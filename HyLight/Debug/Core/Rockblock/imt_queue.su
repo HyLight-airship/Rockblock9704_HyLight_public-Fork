@@ -1,0 +1,9 @@
+../Core/Rockblock/imt_queue.c:11:6:imtQueueMoAdd	32	static
+../Core/Rockblock/imt_queue.c:31:6:imtQueueMtAdd	24	static
+../Core/Rockblock/imt_queue.c:56:6:imtQueueMtLock	16	static
+../Core/Rockblock/imt_queue.c:68:9:imtQueueMoGetFirst	16	static
+../Core/Rockblock/imt_queue.c:80:9:imtQueueMtGetFirst	16	static
+../Core/Rockblock/imt_queue.c:92:9:imtQueueMtGetLast	16	static
+../Core/Rockblock/imt_queue.c:104:6:imtQueueMoRemove	24	static
+../Core/Rockblock/imt_queue.c:125:6:imtQueueMtRemove	24	static
+../Core/Rockblock/imt_queue.c:146:6:imtQueueInit	16	static

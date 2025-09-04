@@ -1,0 +1,2 @@
+../Core/Rockblock/third_party/base64/base64.c:61:5:mbedtls_base64_encode	9
+../Core/Rockblock/third_party/base64/base64.c:128:5:mbedtls_base64_decode	27

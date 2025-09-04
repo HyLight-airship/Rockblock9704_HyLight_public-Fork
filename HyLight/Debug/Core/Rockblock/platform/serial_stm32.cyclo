@@ -1,0 +1,7 @@
+../Core/Rockblock/platform/serial_stm32.c:37:6:HAL_UARTEx_RxEventCallback	6
+../Core/Rockblock/platform/serial_stm32.c:71:6:setContextStm32	2
+../Core/Rockblock/platform/serial_stm32.c:90:13:openPortStm32	5
+../Core/Rockblock/platform/serial_stm32.c:118:13:closePortStm32	3
+../Core/Rockblock/platform/serial_stm32.c:129:12:writeStm32	3
+../Core/Rockblock/platform/serial_stm32.c:142:12:readStm32	4
+../Core/Rockblock/platform/serial_stm32.c:158:12:peekStm32	3

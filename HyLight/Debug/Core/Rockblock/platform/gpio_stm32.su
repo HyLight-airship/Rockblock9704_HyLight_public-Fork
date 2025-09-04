@@ -1,0 +1,4 @@
+../Core/Rockblock/platform/gpio_stm32.c:21:6:gpioDriveHigh	16	static
+../Core/Rockblock/platform/gpio_stm32.c:33:6:gpioDriveLow	16	static
+../Core/Rockblock/platform/gpio_stm32.c:45:5:gpioReceive	16	static
+../Core/Rockblock/platform/gpio_stm32.c:57:6:gpioListenIridBooted	32	static

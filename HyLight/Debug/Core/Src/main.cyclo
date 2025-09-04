@@ -1,0 +1,15 @@
+../Core/Src/main.c:91:6:BspCOM_Init	1
+../Core/Src/main.c:99:5:_write	3
+../Core/Src/main.c:110:6:onMessageProvisioning	3
+../Core/Src/main.c:123:6:onMoComplete	2
+../Core/Src/main.c:136:6:onMtComplete	7
+../Core/Src/main.c:176:6:onConstellationState	2
+../Core/Src/main.c:190:5:main	10
+../Core/Src/main.c:299:13:sendFtsStatusMessage	3
+../Core/Src/main.c:318:6:SystemClock_Config	3
+../Core/Src/main.c:354:13:MX_USART1_UART_Init	5
+../Core/Src/main.c:374:13:MX_GPIO_USART2_Init	1
+../Core/Src/main.c:386:13:MX_USART2_UART_Init	2
+../Core/Src/main.c:407:13:MX_DMA_Init	1
+../Core/Src/main.c:420:13:MX_GPIO_Init	1
+../Core/Src/main.c:450:6:Error_Handler	2

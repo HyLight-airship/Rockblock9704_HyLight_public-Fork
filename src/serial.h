@@ -12,19 +12,22 @@ extern "C" {
 #if defined(_WIN32)
 #include <io.h>
 #define access _access
-#else
+#elif defined(__linux__) || defined(__APPLE__) // <-- The include was moved here
 #include <unistd.h>
 #endif
 
+// This block includes the correct platform-specific header file
 #if defined(__linux__) || defined(__APPLE__)
-    #include "serial_presets/serial_linux/serial_linux.h"
+    #include "serial_linux.h"
 #elif defined(_WIN32)
-    #include "serial_presets/serial_windows/serial_windows.h"
-#elif ARDUINO
-    #include "serial_presets/serial_arduino/serial_arduino.h"
+    #include "serial_windows.h"
+#elif defined(ARDUINO)
+    #include "serial_arduino.h"
+#elif defined(USE_STM32_HAL)
+    #include "serial_stm32.h" // This line is the new addition
 #endif
 
-#define SERIAL_PORT_LENGTH 50U // Should be more than enough, don't want to use PATH_MAX as it will be wasteful
+#define SERIAL_PORT_LENGTH 50U
 
 // Callback functions which will link to the serial interface
 typedef bool(*serialInitFunc)();

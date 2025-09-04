@@ -32,9 +32,13 @@ extern "C" {
     #ifndef IMT_PAYLOAD_SIZE
         #define IMT_PAYLOAD_SIZE 5000U + IMT_CRC_SIZE
     #endif
+#elif defined(USE_STM32_HAL)
+    #ifndef IMT_PAYLOAD_SIZE
+        #define IMT_PAYLOAD_SIZE 2048U + IMT_CRC_SIZE // 2KB buffer for STM32
+    #endif
 #else
     #ifndef IMT_PAYLOAD_SIZE
-        #define IMT_PAYLOAD_SIZE 100000U + IMT_CRC_SIZE
+        #define IMT_PAYLOAD_SIZE 100000U + IMT_CRC_SIZE // 100KB buffer for PC/Linux
     #endif
 #endif
 

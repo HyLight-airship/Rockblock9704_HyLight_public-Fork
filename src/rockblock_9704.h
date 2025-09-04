@@ -22,8 +22,7 @@ extern "C" {
 /**
  * @enum rbMsgStatus_t.
  * @brief Indicates the result of a message operation.
- * 
- * This enum represents success or failure of processing either an incoming 
+ * * This enum represents success or failure of processing either an incoming
  * or outgoing message.
  */
 typedef enum
@@ -42,24 +41,21 @@ typedef enum
 /**
  * @brief Struct containing user defined callback functions for asynchronous 
  * operations.
- * 
- * This structure allows the user to register custom handlers that this library 
+ * * This structure allows the user to register custom handlers that this library
  * will invoke during specific events.
  */
 typedef struct 
 {
     /**
      * @brief Callback for message provisioning info once its been obtained.
-     * 
-     * @param messageProvisioning Pointer to the provisioning info structure.
+     * * @param messageProvisioning Pointer to the provisioning info structure.
      */
     void (*messageProvisioning)(const jsprMessageProvisioning_t *messageProvisioning);
 
     /**
      * @brief Callback for when a mobile-originated (MO) message has finished processing 
      * and been sent successfully.
-     * 
-     * @param id Unique Identifier of the message.
+     * * @param id Unique Identifier of the message.
      * @param status Enum indicating result of processing (-1 for failure & 1 for success).
      */
     void (*moMessageComplete)(const uint16_t id, const rbMsgStatus_t status);
@@ -67,27 +63,23 @@ typedef struct
     /**
      * @brief Callback for when a mobile-terminated (MT) message has finished processing 
      * and been received successfully.
-     * 
-     * @param id Unique Identifier of the message.
+     * * @param id Unique Identifier of the message.
      * @param status Enum indicating result of processing (-1 for failure & 1 for success).
      */
     void (*mtMessageComplete)(const uint16_t id, const rbMsgStatus_t status);
 
     /**
      * @brief Callback for the constellationState (signal) has been updated.
-     * 
-     * @param state Pointer to the updated constellation state structure.
+     * * @param state Pointer to the updated constellation state structure.
      */
     void (*constellationState)(const jsprConstellationState_t *state);
 } rbCallbacks_t;
 
 /**
  * @brief Registers a set of user-defined callbacks with the library.
- * 
- * This function will store the user provided callback functions, which 
+ * * This function will store the user provided callback functions, which
  * will be called by the library during relevant events.
- * 
- * @param callbacks Pointer to a structure containing function pointers to user-defined callbacks.
+ * * @param callbacks Pointer to a structure containing function pointers to user-defined callbacks.
  */
 void rbRegisterCallbacks(const rbCallbacks_t *callbacks);
 
@@ -130,6 +122,8 @@ void rbRegisterCallbacks(const rbCallbacks_t *callbacks);
         #define SERIAL_CONTEXT_SETUP_FUNC setContextWindows
     #elif ARDUINO
         #define SERIAL_CONTEXT_SETUP_FUNC setContextArduino
+    #elif defined(USE_STM32_HAL)
+        #define SERIAL_CONTEXT_SETUP_FUNC setContextStm32
     #endif
 #endif
 
@@ -165,23 +159,20 @@ typedef enum
  * @brief Initialise the the serial connection in the detected context (or user defined),
  * if successful continue to set the API, SIM & state of the modem in order
  * to be ready for messaging.
- * 
- * @param port pointer to port name.
+ * * @param port pointer to port name.
  * @return bool depicting success or failure.
  */
 bool rbBegin(const char * port);
 
 /**
  * @brief Uninitialise/close the the serial connection.
- * 
- * @return bool depicting success or failure.
+ * * @return bool depicting success or failure.
  */
 bool rbEnd(void);
 
 /**
  * @brief Send a mobile originated message from the modem on the default topic (244).
- * 
- * @param data pointer to data (message).
+ * * @param data pointer to data (message).
  * @param length size_t of data length. (Max 100kB).
  * @param timeout in seconds.
  * @return bool depicting success or failure.
@@ -190,8 +181,7 @@ bool rbSendMessage(const char * data, const size_t length, const int timeout);
 
 /**
  * @brief Send a mobile originated message from the modem on a cloudloop topic of choice.
- * 
- * @param topic uint16_t topic.
+ * * @param topic uint16_t topic.
  * @param data pointer to data (message).
  * @param length size_t of data length. (Max 100kB).
  * @param timeout in seconds.
@@ -201,8 +191,7 @@ bool rbSendMessageCloudloop(cloudloopTopics_t topic, const char * data, const si
 
 /**
  * @brief Send a mobile originated message from the modem on any topic.
- * 
- * @param topic uint16_t topic.
+ * * @param topic uint16_t topic.
  * @param data pointer to data (message).
  * @param length size_t of data length. (Max 100kB).
  * @param timeout in seconds.
@@ -212,11 +201,9 @@ bool rbSendMessageAny(uint16_t topic, const char * data, const size_t length, co
 
 /**
  * @brief Listen for a mobile terminated message from the modem.
- * 
- * @param buffer pointer to buffer of the stored MT messages.
+ * * @param buffer pointer to buffer of the stored MT messages.
  * @return size_t the length of the buffer minus the IMT CRC.
- * 
- * * @note this pointer is a pointer to a pointer to the MT queue buffer, 
+ * * * @note this pointer is a pointer to a pointer to the MT queue buffer,
  * it may be reused to store another MT. It must be copied if the application 
  * code needs to preserve it for a period of time.
  */
@@ -224,24 +211,20 @@ size_t rbReceiveMessage(char ** buffer);
 
 /**
  * @brief Listen for a mobile terminated message from the modem.
- * 
- * @param buffer pointer to buffer of the stored MT messages.
+ * * @param buffer pointer to buffer of the stored MT messages.
  * @param topic uint16_t topic.
  * @return size_t the length of the buffer minus the IMT CRC.
- * 
- * * @note this pointer is a pointer to a pointer to the MT queue buffer, 
+ * * * @note this pointer is a pointer to a pointer to the MT queue buffer,
  * it may be reused to store another MT. It must be copied if the application 
  * code needs to preserve it for a period of time.
  */
-size_t rbReceiveMessageWithTopic(char ** buffer, uint16_t topic);
+size_t rbReceiveMessageWithTopic(char ** buffer, uint16_t * topic);
 
 /**
  * @brief Check if a valid message exists, stored at the head of the receiving queue.
- * 
- * @param buffer pointer to buffer of the stored MT messages.
+ * * @param buffer pointer to buffer of the stored MT messages.
  * @return size_t the length of the buffer minus the IMT CRC.
- * 
- * * @note this pointer is a pointer to a pointer to the MT queue buffer, 
+ * * * @note this pointer is a pointer to a pointer to the MT queue buffer,
  * it may be reused to store another MT. It must be copied if the application 
  * code needs to preserve it for a period of time.
  */
@@ -249,10 +232,8 @@ size_t rbReceiveMessageAsync(char ** buffer);
 
 /**
  * @brief Acknowledge the head of the receiving queue by discarding it.
- * 
- * @return bool depicting success or failure.
- * 
- * * @note This function will clear the head of the receiving queue 
+ * * @return bool depicting success or failure.
+ * * * @note This function will clear the head of the receiving queue
  * to make space for other incoming messages, new messages will always 
  * be brought to the head of the queue whilst old ones will be automatically
  * discarded if they reach the end of the queue to make space.
@@ -262,8 +243,7 @@ bool rbAcknowledgeReceiveHeadAsync(void);
 /**
  * @brief Locks the receiving queue so that old messages aren't discarded 
  * when incoming ones arrive.
- * 
- * * @note Locking the queue will cause new messages to be rejected unless 
+ * * * @note Locking the queue will cause new messages to be rejected unless
  * more space is made in the queue by acknowledging existing messages.
  */
 void rbReceiveLockAsync(void);
@@ -271,30 +251,25 @@ void rbReceiveLockAsync(void);
 /**
  * @brief Unlocks the receiving queue so that old messages are discarded 
  * to make space for incoming ones.
- * 
- * * @note The queue is unlocked by default, so there is no need to call 
+ * * * @note The queue is unlocked by default, so there is no need to call
  * this function unless rbReceiveLockAsync() was previously used.
  */
 void rbReceiveUnlockAsync(void);
 
 /**
  * @brief Queue a message to be sent.
- * 
- * @param topic uint16_t topic.
+ * * @param topic uint16_t topic.
  * @param data pointer to data (message).
  * @param length size_t of data length. (Max 100kB).
- * 
- * @return bool depicting success or failure.
- * 
- * * @note This function will put a message in the outgoing queue to be
- *  handled by rbPoll().
+ * * @return bool depicting success or failure.
+ * * * @note This function will put a message in the outgoing queue to be
+ * handled by rbPoll().
  */
 bool rbSendMessageAsync(uint16_t topic, const char * data, const size_t length);
 
 /**
  * @brief Polling function that handles all incoming communication from the modem.
- * 
- * * @note This function is used in a asynchronous approach and will need to be 
+ * * * @note This function is used in a asynchronous approach and will need to be
  * called very frequently as it is non-blocking. 
  */
 void rbPoll(void);
@@ -315,36 +290,31 @@ int8_t rbGetSignal(void);
 
 /**
  * @brief Get the hardware version.
- * 
- * @return char pointer to hwVersion string.
+ * * @return char pointer to hwVersion string.
  */
 char * rbGetHwVersion(void);
 
 /**
  * @brief Get the serial number.
- * 
- * @return char pointer to serial number string.
+ * * @return char pointer to serial number string.
  */
 char * rbGetSerialNumber(void);
 
 /**
  * @brief Get the imei.
- * 
- * @return char pointer to imei string.
+ * * @return char pointer to imei string.
  */
 char * rbGetImei(void);
 
 /**
  * @brief Get the board temperature.
- * 
- * @return int8_t of the current temperature (-100 on error).
+ * * @return int8_t of the current temperature (-100 on error).
  */
 int8_t rbGetBoardTemp(void);
 
 /**
  * @brief Check if SIM presence is currently asserted.
- * 
- * @return bool depicting SIM presence.
+ * * @return bool depicting SIM presence.
  * * @note This function will return false either if it received
  * it from the modem or the function failed.
  */
@@ -354,8 +324,7 @@ bool rbGetCardPresent(void);
  * @brief Check if SIM card is present, communicating properly with,
  * and has presented no errors in SIM transactions with the
  * transceiver.
- * 
- * @return bool depicting SIM communicating correctly.
+ * * @return bool depicting SIM communicating correctly.
  * * @note This function will return false either if it received
  * it from the modem or the function failed.
  */
@@ -363,8 +332,7 @@ bool rbGetSimConnected(void);
 
 /**
  * @brief Get the iccid.
- * 
- * @return char pointer to iccid string.
+ * * @return char pointer to iccid string.
  */
 char * rbGetIccid(void);
 
@@ -372,19 +340,16 @@ char * rbGetIccid(void);
  * @brief Get the Iridium modem firmware version as vX.Y.X
  * with X being the major number, Y being the minor number and X
  * being the patch number
- * 
- * @return char pointer to firmware version
+ * * @return char pointer to firmware version
  */
-char *  rbGetFirmwareVersion(void);
+char * rbGetFirmwareVersion(void);
 
 /**
  * @brief Requests a resynchronisation of the service configuration.
- * 
- * Call this method if the provisioning state has changed but the modem
+ * * Call this method if the provisioning state has changed but the modem
  * is still reporting outdated configuration data. This will clear the 
  * stored provisioning configuration and force a resync with the gateway.
- * 
- * This function must be called after the modem has been power-cycled.
+ * * This function must be called after the modem has been power-cycled.
  * It is recommended to:
  * 1. Power off the RockBLOCK 9704.
  * 2. Power it back on.
@@ -398,8 +363,7 @@ bool rbResyncServiceConfig(void);
 #if defined(KERMIT)
 /**
  * @brief A callback definition for the kermit transfer
- * 
- * @param context a pointer to some shared context given in rbUpdateFirmware.
+ * * @param context a pointer to some shared context given in rbUpdateFirmware.
  * @param sofar the number of bytes transferred so far.
  * @param total the total number of bytes to transfer.
  * @return void
@@ -410,8 +374,7 @@ typedef void(*updateProgressCallback)(void * context, const unsigned long sofar,
 /**
  * @brief Update 9704 firmware. This is a blocking call and will take approximately
  * 10 minutes to upgrade, the updateProgressCallback is recommended.
- * 
- * @param firmwareFile path to the sxbin firmware files from Iridium
+ * * @param firmwareFile path to the sxbin firmware files from Iridium
  * @param progress pointer to the update progress callback, this can be NULL.
  * @param context pointer to to some shared memory to pass to progress, this can be NULL.
  * @return bool true if the upgrade was successful.
@@ -424,13 +387,11 @@ bool rbUpdateFirmware (const char * firmwareFile, updateProgressCallback progres
 #include "gpio.h"
 
 /**
- * 
- * @brief Drives user defined pin (power enable) low and user defined pin (iridium enable) high to 
+ * * @brief Drives user defined pin (power enable) low and user defined pin (iridium enable) high to
  * initialise the RB9704 PiHat. Initialise the serial connection in the 
  * detected context (or user defined), if successful continue to set 
  * the API, SIM & state of the modem in order to be ready for messaging.
- * 
- * @param port pointer to port name.
+ * * @param port pointer to port name.
  * @param gpioInfo structure containing a valid chip & pin for powerEnable, IridiumEnable and booted.
  * @param timeout in seconds.
  * @return bool depicting success or failure.
@@ -441,8 +402,7 @@ bool rbBeginGpio(char * port, const rbGpioTable_t * gpioInfo, const int timeout)
  * @brief Drives user defined pin (power enable) high and another
  * user defined pin (iridium enable) low to deinitialise the RB9704
  * PiHat. Deinitialises/closes the the serial connection.
- * 
- * @param gpioInfo structure containing a valid chip & pin for powerEnable, IridiumEnable and booted.
+ * * @param gpioInfo structure containing a valid chip & pin for powerEnable, IridiumEnable and booted.
  * @return bool depicting success or failure.
  */
 bool rbEndGpio(const rbGpioTable_t * gpioInfo);

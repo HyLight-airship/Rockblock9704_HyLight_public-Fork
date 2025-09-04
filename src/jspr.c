@@ -12,11 +12,58 @@
 #include <unistd.h>
 #endif
 
-//Messaging Variables
+// =============================================================================
+// GLOBAL VARIABLES AND EXTERNAL REFERENCES
+// =============================================================================
+
+/**
+ * @brief Global message reference counter for JSPR messaging
+ * 
+ * Provides unique request references (1-100) for message originate
+ * commands. Increments with each use and wraps around after reaching 100.
+ */
 int messageReference = 1;
+
+/**
+ * @brief Static receive buffer for JSPR communication
+ * 
+ * Buffer used to store incoming JSPR messages from the modem.
+ * This buffer is reused for all incoming messages to avoid
+ * dynamic memory allocation.
+ */
 static uint8_t jsprRxBuffer [RX_BUFFER_SIZE];
+
+/**
+ * @brief External serial context for communication
+ * 
+ * Contains function pointers for serial port operations including
+ * read, write, and peek functions.
+ */
 extern serialContext context;
 
+/**
+ * @brief Shared JSPR response structure
+ * 
+ * Static response structure shared across all JSPR operations
+ * to avoid stack allocation of large structures.
+ */
+static jsprResponse_t shared_jspr_response;
+
+// =============================================================================
+// JSPR COMMUNICATION FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Send data to the modem over the serial port
+ * 
+ * Sends the specified buffer to the modem through the serial interface.
+ * Verifies that the data was sent successfully and optionally prints
+ * debug information if DEBUG is defined.
+ * 
+ * @param buffer Pointer to the data buffer to send
+ * @param length Number of bytes to send
+ * @return Number of bytes written, or -1 if error occurred
+ */
 int sendJspr(const char *buffer, size_t length)
 {
         int bytesWritten = context.serialWrite(buffer, length);
@@ -32,139 +79,108 @@ int sendJspr(const char *buffer, size_t length)
         return bytesWritten;
 }
 
-bool receiveJspr(jsprResponse_t * response, const char * expectedTarget)
+/**
+ * @brief Receive data from the modem over the serial port
+ * 
+ * Waits for incoming data from the modem with a specified timeout.
+ * Parses the received JSPR message to extract the result code,
+ * target, and JSON payload. Optionally prints debug information
+ * if DEBUG is defined.
+ * 
+ * @param timeout_ms Maximum time to wait for a complete message in milliseconds
+ * @return Pointer to the parsed response structure, or NULL if timeout occurred
+ */
+jsprResponse_t* receiveJspr(const uint32_t timeout_ms)
 {
-    bool received = false;
-    int loop;
-    char resultCode[JSPR_RESULT_CODE_LENGTH + 1]; // Plus 1 for the NULL
     uint16_t pos = 0;
-    int bytesRead;
-    bool validResponse = false;
-    bool reading = true;
-    bool gotResponse = false;
+    int bytesRead = 0;
+    char resultCode[JSPR_RESULT_CODE_LENGTH + 1];
     char * targetStart = NULL;
     char * targetEnd = NULL;
     uint16_t targetLength = 0;
-    size_t resultCodeIndexStart = 0;
     char * jsonStart = NULL;
+    uint32_t startTime = millis();
+    jsprResponse_t* response = &shared_jspr_response; // Use the shared buffer
 
-    clearResponse(response); //make sure we're dealing with an empty structure
-    if((context.serialRead != NULL) && (response != NULL))
+    if (context.serialRead == NULL)
     {
-        memset(jsprRxBuffer, 0 , RX_BUFFER_SIZE);
-        do
+        return NULL;
+    }
+
+    clearResponse(response);
+    memset(jsprRxBuffer, 0 , RX_BUFFER_SIZE);
+
+    // Wait for a complete message or timeout
+    while ((millis() - startTime) < timeout_ms)
+    {
+        if (context.serialPeek() > 0)
         {
-            while(pos < (RX_BUFFER_SIZE - 1))
+            bytesRead = context.serialRead((char*)&jsprRxBuffer[pos], 1);
+            if (bytesRead > 0)
             {
-                bytesRead = context.serialRead(&jsprRxBuffer[pos], 1);
-                if (bytesRead <= 0)
+                // Look for the end of a message
+                if (jsprRxBuffer[pos] == '\r' && pos > JSPR_MIN_RESPONSE)
                 {
-                    reading = false; //make function non-blocking
-                    break;
-                }
-                if (jsprRxBuffer[pos] == '\r' && pos > 2)
-                {
-                    jsprRxBuffer[pos] = '\0'; // Replace with NULL
-                    validResponse = true;
-                    break;
-                }
-                pos++;
-            }
+                    jsprRxBuffer[pos] = '\0'; // Null-terminate the string
 
-            if(validResponse == true)
-            {
-#ifdef DEBUG
-            printf("RECEIVED: %s\r\n", jsprRxBuffer);
-#endif
-                if (pos >= JSPR_MIN_RESPONSE)
-                {
-                    // Strip unwanted characters at the start, this can happen with bootInfo message
-                    // this seems to be DC1 character at the start
-                    while ((response->code < JSPR_RC_NO_ERROR) || (response->code > JSPR_RC_SERIAL_PORT_ERROR))
+                    // --- Start Parsing ---
+                    strncpy(resultCode, (char*)jsprRxBuffer, JSPR_RESULT_CODE_LENGTH);
+                    resultCode[JSPR_RESULT_CODE_LENGTH] = '\0';
+                    response->code = (uint16_t)atoi(resultCode);
+
+                    if (response->code < 200)
                     {
-                        if ((RX_BUFFER_SIZE - resultCodeIndexStart) <  JSPR_RESULT_CODE_LENGTH)
-                        {
-                            break;
-                        }
-
-                        for(uint8_t i = 0; i < JSPR_RESULT_CODE_LENGTH; i++)
-                        {
-                            resultCode[i] = jsprRxBuffer[i + resultCodeIndexStart];
-                        }
-
-                        resultCode[JSPR_RESULT_CODE_LENGTH] = '\0';
-                        response->code = (uint16_t)atoi(resultCode);
-
-                        if ((response->code < JSPR_RC_NO_ERROR) || (response->code > JSPR_RC_SERIAL_PORT_ERROR))
-                        {
-                            resultCodeIndexStart++;
-                        }
-                    };
-
-                    if (resultCodeIndexStart > 0)
-                    {
-                        memmove(jsprRxBuffer, &jsprRxBuffer[resultCodeIndexStart], (pos - resultCodeIndexStart));
+                        pos = 0;
+                        continue;
                     }
 
-                    targetStart = &jsprRxBuffer[JSPR_RESULT_CODE_LENGTH + 1];
+#ifdef DEBUG
+                    printf("RECEIVED: %s\r\n", jsprRxBuffer);
+#endif
+
+                    targetStart = (char*)&jsprRxBuffer[JSPR_RESULT_CODE_LENGTH + 1];
                     targetEnd = strchr(targetStart, ' ');
+                    if (targetEnd == NULL)
+                    {
+                        pos = 0; // Malformed, reset
+                        continue;
+                    }
+
                     targetLength = targetEnd - targetStart;
                     memcpy(response->target, targetStart, targetLength);
                     response->target[targetLength] = '\0';
 
-                    if (expectedTarget != NULL)
+                    jsonStart = strchr(targetStart, '{');
+                    if (jsonStart != NULL)
                     {
-                        if (strncmp(response->target, expectedTarget, JSPR_MAX_TARGET_LENGTH) !=0)
-                        {
-                            pos = 0;
-                            memset(jsprRxBuffer, 0 , RX_BUFFER_SIZE);
-                            memset(response, 0, sizeof(response));
-                            continue;
-                        }
+                        response->jsonSize = strlen(jsonStart);
+                        strncpy(response->json, jsonStart, response->jsonSize);
+                        response->json[response->jsonSize] = '\0';
                     }
 
-                    jsonStart = strchr(targetStart, '{');
-                    response->jsonSize = strchr(targetStart, '\0') - jsonStart;
-                    strncpy(response->json, jsonStart, response->jsonSize);
-                    response->json[response->jsonSize] = '\0';
-                    reading = false;
-                    gotResponse = true;
-                    received = true;
+                    return response; // Return pointer to the populated shared buffer
+                }
+                pos++;
+                if (pos >= RX_BUFFER_SIZE) // Prevent buffer overflow
+                {
+                    pos = 0;
                 }
             }
-        }while(reading == true);
-    return received;
-    }
-}
-
-bool waitForJsprMessage(jsprResponse_t * response, const char * expectedTarget, const uint32_t expectedCode, const uint32_t timeoutSeconds)
-{
-    bool gotMessage = false;
-    unsigned long startTime = millis();
-
-    while (1)
-    {
-        receiveJspr(response, expectedTarget);
-
-        if (response->code == expectedCode &&
-            strncmp(response->target, expectedTarget, JSPR_MAX_TARGET_LENGTH) == 0)
-        {
-            gotMessage = true;
-            break;
         }
-
-        if ((millis() - startTime) > timeoutSeconds * 1000)
-        {
-            gotMessage = false;
-            break;
-        }
-
-        delay(10);
     }
 
-    return gotMessage;
+    return NULL; // Timeout occurred, return NULL
 }
 
+/**
+ * @brief Clear the response buffer structure
+ * 
+ * Resets all fields of the response structure to their default values.
+ * This function is called before parsing new responses to ensure
+ * clean state for the next operation.
+ * 
+ * @param response Pointer to the response structure to clear
+ */
 void clearResponse(jsprResponse_t * response)
 {
     response->code = 0;
@@ -173,6 +189,21 @@ void clearResponse(jsprResponse_t * response)
     memset(response->target, 0, JSPR_MAX_TARGET_LENGTH);
 }
 
+// =============================================================================
+// JSPR RESPONSE PARSING FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Parse boot information from JSPR response string
+ * 
+ * Extracts boot information from a JSPR response including image type,
+ * boot source, and version details. Uses cJSON library to parse the
+ * JSON payload and populate the bootInfo structure.
+ * 
+ * @param jsprString JSPR response string containing boot information
+ * @param bootInfo Pointer to structure to store parsed boot information
+ * @return true if parsing was successful, false otherwise
+ */
 bool parseJsprBootInfo(const char * jsprString, jsprBootInfo_t * bootInfo)
 {
     bool parsed = false;
@@ -256,6 +287,18 @@ bool parseJsprBootInfo(const char * jsprString, jsprBootInfo_t * bootInfo)
     return parsed;
 }
 
+/**
+ * @brief Parse API version information from JSPR response string
+ * 
+ * Extracts API version information from a JSPR response including
+ * supported versions and active version. Parses both the supported
+ * versions array and the active version object to populate the
+ * apiVersion structure.
+ * 
+ * @param jsprString JSPR response string containing API version information
+ * @param apiVersion Pointer to structure to store parsed API version information
+ * @return true if parsing was successful, false otherwise
+ */
 bool parseJsprGetApiVersion(char * jsprString, jsprApiVersion_t * apiVersion)
 {
     bool parsed = false;
@@ -315,6 +358,17 @@ bool parseJsprGetApiVersion(char * jsprString, jsprApiVersion_t * apiVersion)
     return parsed;
 }
 
+/**
+ * @brief Parse firmware information from JSPR response string
+ * 
+ * Extracts firmware information from a JSPR response including slot,
+ * validity, version details, and hash. Uses cJSON library to parse
+ * the JSON payload and populate the firmwareInfo structure.
+ * 
+ * @param jsprString JSPR response string containing firmware information
+ * @param firmwareInfo Pointer to structure to store parsed firmware information
+ * @return true if parsing was successful, false otherwise
+ */
 bool parseJsprFirmwareInfo(const char * jsprString, jsprFirmwareInfo_t * firmwareInfo)
 {
     bool parsed = false;
@@ -405,6 +459,17 @@ bool parseJsprFirmwareInfo(const char * jsprString, jsprFirmwareInfo_t * firmwar
     return parsed;
 }
 
+/**
+ * @brief Parse SIM interface configuration from JSPR response string
+ * 
+ * Extracts SIM interface configuration from a JSPR response including
+ * the active interface type. Converts the string interface value to
+ * the corresponding enumeration value.
+ * 
+ * @param jsprString JSPR response string containing SIM interface information
+ * @param simInterface Pointer to structure to store parsed SIM interface information
+ * @return true if parsing was successful, false otherwise
+ */
 bool parseJsprGetSimInterface(char * jsprString, jsprSimInterface_t * simInterface)
 {
     bool parsed = false;
@@ -450,6 +515,17 @@ bool parseJsprGetSimInterface(char * jsprString, jsprSimInterface_t * simInterfa
     return parsed;
 }
 
+/**
+ * @brief Parse operational state from JSPR response string
+ * 
+ * Extracts operational state information from a JSPR response including
+ * the reason and state. Parses the reason as an integer and the state
+ * as a string.
+ * 
+ * @param jsprString JSPR response string containing operational state information
+ * @param operationalState Pointer to structure to store parsed operational state information
+ * @return true if parsing was successful, false otherwise
+ */
 bool parseJsprGetOperationalState(char * jsprString, jsprOperationalState_t * operationalState)
 {
     bool parsed = false;
@@ -518,6 +594,17 @@ bool parseJsprGetOperationalState(char * jsprString, jsprOperationalState_t * op
     return parsed;
 }
 
+/**
+ * @brief Parse message originate from JSPR response string
+ * 
+ * Extracts message originate information from a JSPR response including
+ * topic ID, request reference, and message response. Parses the
+ * message response as a string and sets the corresponding enum value.
+ * 
+ * @param jsprString JSPR response string containing message originate information
+ * @param messageOriginate Pointer to structure to store parsed message originate information
+ * @return true if parsing was successful, false otherwise
+ */
 bool parseJsprPutMessageOriginate(char * jsprString, jsprMessageOriginate_t  * messageOriginate)
 {
     bool parsed = false;
@@ -579,6 +666,16 @@ bool parseJsprPutMessageOriginate(char * jsprString, jsprMessageOriginate_t  * m
     return parsed;
 }
 
+/**
+ * @brief Parse message originate segment from JSPR response string
+ * 
+ * Extracts message originate segment information from a JSPR response
+ * including topic ID, segment length, segment start, and message ID.
+ * 
+ * @param jsprString JSPR response string containing message originate segment information
+ * @param messageOriginateSegment Pointer to structure to store parsed message originate segment information
+ * @return true if parsing was successful, false otherwise
+ */
 bool parseJsprUnsMessageOriginateSegment(char * jsprString, jsprMessageOriginateSegment_t * messageOriginateSegment)
 {
     bool parsed = false;
@@ -627,6 +724,16 @@ bool parseJsprUnsMessageOriginateSegment(char * jsprString, jsprMessageOriginate
     return parsed;
 }
 
+/**
+ * @brief Parse message terminate from JSPR response string
+ * 
+ * Extracts message terminate information from a JSPR response including
+ * topic ID, message length max, and message ID.
+ * 
+ * @param jsprString JSPR response string containing message terminate information
+ * @param messageTerminate Pointer to structure to store parsed message terminate information
+ * @return true if parsing was successful, false otherwise
+ */
 bool parseJsprUnsMessageTerminate(char * jsprString, jsprMessageTerminate_t * messageTerminate)
 {
     bool parsed = false;
@@ -667,6 +774,17 @@ bool parseJsprUnsMessageTerminate(char * jsprString, jsprMessageTerminate_t * me
     return parsed;
 }
 
+/**
+ * @brief Parse message terminate segment from JSPR response string
+ * 
+ * Extracts message terminate segment information from a JSPR response
+ * including topic ID, segment length, segment start, message ID, and
+ * data. Parses the data as a string and stores it in the data buffer.
+ * 
+ * @param jsprString JSPR response string containing message terminate segment information
+ * @param messageTerminateSegment Pointer to structure to store parsed message terminate segment information
+ * @return true if parsing was successful, false otherwise
+ */
 bool parseJsprUnsMessageTerminateSegment(char * jsprString, jsprMessageTerminateSegment_t * messageTerminateSegment)
 {
     bool parsed = false;
@@ -722,6 +840,16 @@ bool parseJsprUnsMessageTerminateSegment(char * jsprString, jsprMessageTerminate
     return parsed;
 }
 
+/**
+ * @brief Parse signal from JSPR response string
+ * 
+ * Extracts signal information from a JSPR response including
+ * constellation visibility, signal level, and signal bars.
+ * 
+ * @param jsprString JSPR response string containing signal information
+ * @param signal Pointer to structure to store parsed signal information
+ * @return true if parsing was successful, false otherwise
+ */
 bool parseJsprGetSignal(char * jsprString, jsprConstellationState_t * signal)
 {
     bool parsed = false;
@@ -759,6 +887,18 @@ bool parseJsprGetSignal(char * jsprString, jsprConstellationState_t * signal)
     return parsed;
 }
 
+/**
+ * @brief Parse message originate status from JSPR response string
+ * 
+ * Extracts message originate status information from a JSPR response
+ * including topic ID, message ID, and final message originate status.
+ * Parses the final message originate status as a string and sets the
+ * corresponding enum value.
+ * 
+ * @param jsprString JSPR response string containing message originate status information
+ * @param messageOriginateStatus Pointer to structure to store parsed message originate status information
+ * @return true if parsing was successful, false otherwise
+ */
 bool parseJsprUnsMessageOriginateStatus(char * jsprString, jsprMessageOriginateStatus_t * messageOriginateStatus)
 {
     bool parsed = false;
@@ -851,6 +991,18 @@ bool parseJsprUnsMessageOriginateStatus(char * jsprString, jsprMessageOriginateS
     return parsed;
 }
 
+/**
+ * @brief Parse message terminate status from JSPR response string
+ * 
+ * Extracts message terminate status information from a JSPR response
+ * including topic ID, message ID, and final message terminate status.
+ * Parses the final message terminate status as a string and sets the
+ * corresponding enum value.
+ * 
+ * @param jsprString JSPR response string containing message terminate status information
+ * @param messageTerminateStatus Pointer to structure to store parsed message terminate status information
+ * @return true if parsing was successful, false otherwise
+ */
 bool parseJsprUnsMessageTerminateStatus(char * jsprString, jsprMessageTerminateStatus_t * messageTerminateStatus)
 {
     bool parsed = false;
@@ -903,6 +1055,17 @@ bool parseJsprUnsMessageTerminateStatus(char * jsprString, jsprMessageTerminateS
     return parsed;
 }
 
+/**
+ * @brief Parse message provisioning from JSPR response string
+ * 
+ * Extracts message provisioning information from a JSPR response including
+ * the list of topics and their configurations. Parses the provisioning
+ * array and populates the messageProvisioning structure.
+ * 
+ * @param jsprString JSPR response string containing message provisioning information
+ * @param messageProvisioning Pointer to structure to store parsed message provisioning information
+ * @return true if parsing was successful, false otherwise
+ */
 bool parseJsprGetMessageProvisioning(char * jsprString, jsprMessageProvisioning_t * messageProvisioning)
 {
         bool parsed = false;
@@ -978,6 +1141,16 @@ bool parseJsprGetMessageProvisioning(char * jsprString, jsprMessageProvisioning_
     return parsed;
 }
 
+/**
+ * @brief Parse hardware information from JSPR response string
+ * 
+ * Extracts hardware information from a JSPR response including
+ * hardware version, serial number, and IMEI.
+ * 
+ * @param jsprString JSPR response string containing hardware information
+ * @param hwInfo Pointer to structure to store parsed hardware information
+ * @return true if parsing was successful, false otherwise
+ */
 bool parseJsprGetHwInfo(char * jsprString, jsprHwInfo_t * hwInfo)
 {
     bool parsed = false;
@@ -1017,6 +1190,16 @@ bool parseJsprGetHwInfo(char * jsprString, jsprHwInfo_t * hwInfo)
     return parsed;
 }
 
+/**
+ * @brief Parse SIM status from JSPR response string
+ * 
+ * Extracts SIM status information from a JSPR response including
+ * card presence, SIM connection, and ICCID.
+ * 
+ * @param jsprString JSPR response string containing SIM status information
+ * @param simStatus Pointer to structure to store parsed SIM status information
+ * @return true if parsing was successful, false otherwise
+ */
 bool parseJsprGetSimStatus(char * jsprString, jsprSimStatus_t * simStatus)
 {
     bool parsed = false;

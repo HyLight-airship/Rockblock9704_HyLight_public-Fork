@@ -13,55 +13,306 @@
 #if defined(_WIN32)
 #include <io.h>
 #define access _access
-#else
+#elif defined(__linux__) || defined(__APPLE__)
 #include <unistd.h>
 #endif
 
+// =============================================================================
+// CONSTANTS AND DEFINITIONS
+// =============================================================================
+
+/**
+ * @brief Minimum allowed topic ID for IMT messaging
+ * 
+ * Defines the lower bound for valid topic identifiers in the
+ * Iridium messaging protocol.
+ */
 #define IMT_MIN_TOPIC_ID 64U
+
+/**
+ * @brief Maximum allowed topic ID for IMT messaging
+ * 
+ * Defines the upper bound for valid topic identifiers in the
+ * Iridium messaging protocol.
+ */
 #define IMT_MAX_TOPIC_ID 65535U
+
+/**
+ * @brief Length of firmware version string
+ * 
+ * Maximum length for storing firmware version information
+ * including major, minor, and patch numbers.
+ */
 #define FIRMWARE_VERSION_STRING_LEN 13U
 
 #ifndef SERIAL_CONTEXT_SETUP_FUNC
     #error A serial context function is needed
 #endif
 
+// =============================================================================
+// EXTERNAL VARIABLES AND REFERENCES
+// =============================================================================
+
+/**
+ * @brief External message reference counter
+ * 
+ * Global counter used to provide unique request references
+ * for message originate commands.
+ */
 extern int messageReference;
+
+/**
+ * @brief External serial communication context
+ * 
+ * Contains function pointers for serial port operations
+ * including initialization, read, write, and deinitialization.
+ */
 extern serialContext context;
+
+/**
+ * @brief External serial state enumeration
+ * 
+ * Tracks the current state of the serial communication
+ * (OPEN, CLOSED, etc.).
+ */
 extern enum serialState serialState;
 
+// =============================================================================
+// STATIC VARIABLES AND BUFFERS
+// =============================================================================
+
+/**
+ * @brief Static buffer for base64 encoding operations
+ * 
+ * Temporary buffer used during base64 encoding and decoding
+ * operations to avoid stack allocation of large buffers.
+ */
 static uint8_t base64Buffer [BASE64_TEMP_BUFFER];
+
+/**
+ * @brief Static buffer for CRC calculations
+ * 
+ * Buffer used to store data during CRC16 calculations
+ * for message integrity verification.
+ */
 static uint8_t crcBuffer [IMT_CRC_SIZE];
 
+/**
+ * @brief Static buffer for firmware version string
+ * 
+ * Buffer used to store the firmware version information
+ * retrieved from the modem.
+ */
 static char firmwareVersion [FIRMWARE_VERSION_STRING_LEN];
 
+// =============================================================================
+// GLOBAL MODEM STATE VARIABLES
+// =============================================================================
+
+/**
+ * @brief Hardware information structure
+ * 
+ * Stores hardware information retrieved from the modem including
+ * version, serial number, and IMEI.
+ */
 jsprHwInfo_t hwInfo;
+
+/**
+ * @brief SIM status information structure
+ * 
+ * Stores SIM card status information including card presence,
+ * connection status, and ICCID.
+ */
 jsprSimStatus_t simStatus;
+
+/**
+ * @brief Firmware information structure
+ * 
+ * Stores firmware information including version details,
+ * validity, and hash values.
+ */
 jsprFirmwareInfo_t firmwareInfo;
+
+/**
+ * @brief Message provisioning information structure
+ * 
+ * Stores message provisioning configuration including
+ * topic lists and their configurations.
+ */
 jsprMessageProvisioning_t messageProvisioningInfo;
 
+/**
+ * @brief Asynchronous message length
+ * 
+ * Stores the length of messages received asynchronously
+ * from the modem.
+ */
 uint32_t messageLengthAsync = 0;
+
+/**
+ * @brief Count of queued Mobile-Originated messages
+ * 
+ * Tracks the number of outgoing messages currently
+ * queued for transmission.
+ */
 uint16_t moQueuedMessages = 0;
+
+/**
+ * @brief Count of queued Mobile-Terminated messages
+ * 
+ * Tracks the number of incoming messages currently
+ * queued for processing.
+ */
 uint16_t mtQueuedMessages = 0;
+
+/**
+ * @brief Receive lock flag
+ * 
+ * When set, prevents new messages from being received
+ * to avoid interrupting ongoing operations.
+ */
 bool Receivelock = false;
+
+/**
+ * @brief Mobile-Originated message dropped flag
+ * 
+ * Indicates that an outgoing message was dropped
+ * due to queue overflow or other conditions.
+ */
 bool moDropped = false;
+
+/**
+ * @brief Mobile-Originated message sent flag
+ * 
+ * Indicates that an outgoing message was successfully
+ * transmitted to the modem.
+ */
 bool moSent = false;
+
+/**
+ * @brief Mobile-Terminated message dropped flag
+ * 
+ * Indicates that an incoming message was dropped
+ * due to queue overflow or other conditions.
+ */
 bool mtDropped = false;
+
+/**
+ * @brief Mobile-Terminated message received flag
+ * 
+ * Indicates that an incoming message was successfully
+ * received from the modem.
+ */
 bool mtReceived = false;
 
+/**
+ * @brief Static pointer to callback functions
+ * 
+ * Points to the registered callback structure containing
+ * function pointers for various RockBLOCK library events.
+ */
 static const rbCallbacks_t *rbCallbacks = NULL;
 
-void rbRegisterCallbacks(const rbCallbacks_t *callbacks) 
+// =============================================================================
+// CALLBACK REGISTRATION FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Register callback functions for RockBLOCK library events
+ * 
+ * Stores a pointer to the callback structure containing function
+ * pointers for various events such as message provisioning,
+ * message reception, and status updates.
+ * 
+ * @param callbacks Pointer to the callback structure to register
+ */
+void rbRegisterCallbacks(const rbCallbacks_t *callbacks)
 {
-    if (callbacks) 
+    if (callbacks)
     {
         rbCallbacks = callbacks;
     }
 }
 
+// =============================================================================
+// GPIO-BASED MODEM CONTROL FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Initialize the RockBLOCK modem using GPIO control
+ * 
+ * Performs the complete power-on sequence for the modem:
+ * 1. Drive power enable pin LOW to power on
+ * 2. Drive iridium enable pin HIGH to activate modem
+ * 3. Wait for boot signal from modem
+ * 4. Handle boot messages
+ * 5. Initialize serial communication
+ * 
+ * This function is only available when RB_GPIO is defined.
+ * 
+ * @param port Serial port name (ignored on STM32)
+ * @param gpioInfo Pointer to GPIO configuration structure
+ * @param timeout Maximum time to wait for boot signal in seconds
+ * @return true if the modem successfully initialized, false otherwise
+ */
 #ifdef RB_GPIO
 bool rbBeginGpio(char * port, const rbGpioTable_t * gpioInfo, const int timeout)
 {
     bool enabled = false;
+#if defined(USE_STM32_HAL)
+    // This is the corrected STM32 implementation.
+    // It now includes the power-on sequence before waiting for the boot signal.
+    if (gpioDriveLow(gpioInfo->powerEnable.port, gpioInfo->powerEnable.pin))
+    {
+        if (gpioDriveHigh(gpioInfo->iridiumEnable.port, gpioInfo->iridiumEnable.pin))
+        {
+            if (gpioListenIridBooted(gpioInfo->booted.port, gpioInfo->booted.pin, timeout))
+            {
+                // --- Boot message handling logic ---
+                uint32_t startTime = HAL_GetTick();
+                bool gotBootInfo = false;
+                bool gotOperationalState = false;
+
+                if(context.serialInit())
+                {
+                    serialState = OPEN;
+                    jsprResponse_t* response_ptr;
+
+                    while ((HAL_GetTick() - startTime < 5000) && !(gotBootInfo && gotOperationalState))
+                    {
+                        response_ptr = receiveJspr(100);
+                        if (response_ptr != NULL)
+                        {
+                            if (response_ptr->code == JSPR_RC_UNSOLICITED_MESSAGE)
+                            {
+                                if (strcmp(response_ptr->target, "bootInfo") == 0)
+                                {
+                                    gotBootInfo = true;
+                                    printf("Modem sent bootInfo.\r\n");
+                                }
+                                else if (strcmp(response_ptr->target, "operationalState") == 0)
+                                {
+                                    gotOperationalState = true;
+                                    printf("Modem sent operationalState.\r\n");
+                                }
+                            }
+                        }
+                    }
+
+                    if(context.serialDeInit()) {
+                        serialState = CLOSED;
+                    }
+                }
+
+                if (rbBegin(port))
+                {
+                    enabled = true;
+                }
+            }
+        }
+    }
+#else
+    // Original implementation for Linux/other platforms
     if (gpioDriveLow(gpioInfo->powerEnable.chip, gpioInfo->powerEnable.pin))
     {
         if (gpioDriveHigh(gpioInfo->iridiumEnable.chip, gpioInfo->iridiumEnable.pin))
@@ -76,12 +327,39 @@ bool rbBeginGpio(char * port, const rbGpioTable_t * gpioInfo, const int timeout)
             }
         }
     }
+#endif
     return enabled;
 }
 
+/**
+ * @brief De-initialize the RockBLOCK modem using GPIO control
+ * 
+ * Performs the complete power-off sequence for the modem:
+ * 1. Drive iridium enable pin LOW to deactivate modem
+ * 2. Drive power enable pin HIGH to power off
+ * 
+ * This function is only available when RB_GPIO is defined.
+ * 
+ * @param gpioInfo Pointer to GPIO configuration structure
+ * @return true if the modem was successfully deinitialized, false otherwise
+ */
 bool rbEndGpio(const rbGpioTable_t * gpioInfo)
 {
     bool disabled = false;
+#if defined(USE_STM32_HAL)
+    // STM32 implementation using .port and .pin
+    if (gpioDriveHigh(gpioInfo->powerEnable.port, gpioInfo->powerEnable.pin))
+    {
+        if (gpioDriveLow(gpioInfo->iridiumEnable.port, gpioInfo->iridiumEnable.pin))
+        {
+            if (rbEnd())
+            {
+                disabled = true;
+            }
+        }
+    }
+#else
+    // Original implementation for Linux/other platforms
     if (gpioDriveHigh(gpioInfo->powerEnable.chip, gpioInfo->powerEnable.pin))
     {
         if (gpioDriveLow(gpioInfo->iridiumEnable.chip, gpioInfo->iridiumEnable.pin))
@@ -92,10 +370,22 @@ bool rbEndGpio(const rbGpioTable_t * gpioInfo)
             }
         }
     }
+#endif
     return disabled;
 }
-#endif
+#endif // RB_GPIO
 
+// =============================================================================
+// CRC16 CALCULATION FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief CRC16 lookup table for polynomial 0x1021
+ * 
+ * Pre-computed CRC16 values for all possible byte values using
+ * the polynomial 0x1021 (CRC-16-CCITT). This table is used for
+ * fast CRC calculation during message integrity verification.
+ */
 static const uint16_t CRC16Table[256] =
 {
   0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50a5, 0x60c6, 0x70e7,
@@ -132,121 +422,132 @@ static const uint16_t CRC16Table[256] =
   0x6e17, 0x7e36, 0x4e55, 0x5e74, 0x2e93, 0x3eb2, 0x0ed1, 0x1ef0
 };
 
+// =============================================================================
+// MODEM CONFIGURATION FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Set the API version for the modem
+ * 
+ * Sends the API version command to the modem and waits for the response.
+ * If no active version is set, it sets the first supported version.
+ * This function is called during modem initialization.
+ * 
+ * @return true if the API version is set successfully, false otherwise
+ */
 static bool setApi(void)
 {
     bool set = false;
-    jsprResponse_t response;
-    for(int i = 0; i < 2; i++)
+    jsprResponse_t* response_ptr;
+    uint32_t startTime = millis();
+
+    jsprGetApiVersion();
+
+    while ((millis() - startTime) < 5000)
     {
-#ifdef ARDUINO
-        delay(5);
-#else
-        usleep(5000);
-#endif
-        if(jsprGetApiVersion())
+        response_ptr = receiveJspr(1000);
+        if (response_ptr != NULL)
         {
-            if (receiveJspr(&response, "apiVersion"))
+            if (strcmp(response_ptr->target, "apiVersion") == 0 && response_ptr->code == JSPR_RC_NO_ERROR)
             {
-                if(JSPR_RC_NO_ERROR == response.code)
+                jsprApiVersion_t apiVersion;
+                memset(&apiVersion, 0, sizeof(apiVersion));
+                parseJsprGetApiVersion(response_ptr->json, &apiVersion);
+
+                if(!apiVersion.activeVersionSet)
                 {
-                    jsprApiVersion_t apiVersion;
-                    parseJsprGetApiVersion(response.json, &apiVersion);
-                    if(!apiVersion.activeVersionSet)
-                    {
-                        jsprPutApiVersion(&apiVersion.supportedVersions[0]);
-                        receiveJspr(&response, "apiVersion");
-                    }
-                    if(JSPR_RC_NO_ERROR == response.code || apiVersion.activeVersionSet)
+                    jsprPutApiVersion(&apiVersion.supportedVersions[0]);
+                    response_ptr = receiveJspr(2000);
+                    if (response_ptr != NULL && response_ptr->code == JSPR_RC_NO_ERROR)
                     {
                         set = true;
-                        i = 2;
                     }
                 }
+                else
+                {
+                    set = true;
+                }
+                break;
             }
         }
     }
     return set;
 }
 
+/**
+ * @brief Set the SIM interface for the modem
+ * 
+ * Sends the SIM interface command to the modem and waits for the response.
+ * If the interface is not set to internal, it configures it to use
+ * the internal SIM interface. This function is called during modem initialization.
+ * 
+ * @return true if the SIM interface is set successfully, false otherwise
+ */
 static bool setSim(void)
 {
     bool set = false;
-    jsprResponse_t response;
+    jsprResponse_t* response_ptr;
     if(jsprGetSimInterface())
     {
-        if (receiveJspr(&response, "simConfig"))
+        response_ptr = receiveJspr(2000);
+        if (response_ptr != NULL && response_ptr->code == JSPR_RC_NO_ERROR)
         {
-            if(JSPR_RC_NO_ERROR == response.code)
-            {
-                jsprSimInterface_t simInterface;
-                parseJsprGetSimInterface(response.json, &simInterface);
-                
-                if(!simInterface.ifaceSet || simInterface.iface != SIM_INTERNAL)
-                {
-                    putSimInterface(SIM_INTERNAL);
-                    receiveJspr(&response, "simConfig");
-                    if ((JSPR_RC_NO_ERROR == response.code) &&
-                        (strncmp(response.target, "simConfig", JSPR_MAX_TARGET_LENGTH) == 0))
-                    {
-                        parseJsprGetSimInterface(response.json, &simInterface);
+            jsprSimInterface_t simInterface;
+            parseJsprGetSimInterface(response_ptr->json, &simInterface);
 
-                        // Wait for unsolicited simStatus to come back
-                        if (waitForJsprMessage(&response, "simStatus", JSPR_RC_UNSOLICITED_MESSAGE, 1) == true)
-                        {
-                            set = true;
-                        }
-                    }
-                }
-                else if (JSPR_RC_NO_ERROR == response.code && simInterface.iface == SIM_INTERNAL)
+            if(!simInterface.ifaceSet || simInterface.iface != SIM_INTERNAL)
+            {
+                putSimInterface(SIM_INTERNAL);
+                response_ptr = receiveJspr(2000);
+                if (response_ptr != NULL && response_ptr->code == JSPR_RC_NO_ERROR &&
+                    (strncmp(response_ptr->target, "simConfig", JSPR_MAX_TARGET_LENGTH) == 0))
                 {
                     set = true;
                 }
             }
+            else if (simInterface.iface == SIM_INTERNAL)
+            {
+                set = true;
+            }
         }
     }
+    receiveJspr(200);
     return set;
 }
 
+/**
+ * @brief Set the operational state for the modem
+ * 
+ * Sends the operational state command to the modem and waits for the response.
+ * If the state is not active, it sets the modem to active state.
+ * This function is called during modem initialization.
+ * 
+ * @return true if the operational state is set successfully, false otherwise
+ */
 static bool setState(void)
 {
     bool set = false;
-    jsprResponse_t response;
+    jsprResponse_t* response_ptr;
     if(jsprGetOperationalState())
     {
-        if(receiveJspr(&response, "operationalState"))
+        response_ptr = receiveJspr(2000);
+        if(response_ptr != NULL && response_ptr->code == JSPR_RC_NO_ERROR)
         {
-            if(JSPR_RC_NO_ERROR == response.code)
+            jsprOperationalState_t state;
+            parseJsprGetOperationalState(response_ptr->json, &state);
+            if(state.operationalStateSet)
             {
-                jsprOperationalState_t state;
-                parseJsprGetOperationalState(response.json, &state);
-                if(state.operationalStateSet)
+                if(state.operationalState == ACTIVE)
                 {
-                    if(state.operationalState == ACTIVE)
+                    set = true;
+                }
+                else
+                {
+                    putOperationalState(ACTIVE);
+                    response_ptr = receiveJspr(2000);
+                    if(response_ptr != NULL && response_ptr->code == JSPR_RC_NO_ERROR)
                     {
                         set = true;
-                    }
-                    else if(state.operationalState == INACTIVE)
-                    {
-                        putOperationalState(ACTIVE);
-                        receiveJspr(&response, "operationalState");
-                        if(JSPR_RC_NO_ERROR == response.code)
-                        {
-                            set = true;
-                        }
-                    }
-                    else //if its in another mode it may need to be turned inactive first
-                    {
-                        putOperationalState(INACTIVE);
-                        receiveJspr(&response, "operationalState");
-                        if(JSPR_RC_NO_ERROR == response.code)
-                        {
-                            putOperationalState(ACTIVE);
-                            receiveJspr(&response, "operationState");
-                            if(JSPR_RC_NO_ERROR == response.code)
-                            {
-                                set = true;
-                            }
-                        }
                     }
                 }
             }
@@ -255,6 +556,60 @@ static bool setState(void)
     return set;
 }
 
+// =============================================================================
+// MODEM INITIALIZATION FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Initialize the RockBLOCK modem
+ * 
+ * This function sets up the serial communication context, configures the API,
+ * SIM, and operational state, and initializes internal message queues.
+ * 
+ * - On STM32 (USE_STM32_HAL defined), the serial port name is ignored and the
+ *   HAL-based serial context is used.
+ * - On other platforms, the given port and default baud rate are used to
+ *   configure the serial context.
+ *
+ * If provisioning information is available, the registered callback
+ * (rbCallbacks->messageProvisioning) will be invoked.
+ * 
+ * @param port Serial port name (ignored on STM32)
+ * @return true if initialization was successful, false otherwise
+ */
+#if defined(USE_STM32_HAL)
+bool rbBegin(const char* port)
+{
+    (void)port;
+    bool began = false;
+    if(context.serialInit != NULL)
+    {
+        if(context.serialInit())
+        {
+            serialState = OPEN;
+            if(setApi())
+            {
+                if(setSim())
+                {
+                    if(setState())
+                    {
+                        imtQueueInit();
+                        if (messageProvisioningInfo.provisioningSet)
+                        {
+                            if (rbCallbacks && rbCallbacks->messageProvisioning)
+                            {
+                                rbCallbacks->messageProvisioning(&messageProvisioningInfo);
+                            }
+                        }
+                        began = true;
+                    }
+                }
+            }
+        }
+    }
+    return began;
+}
+#else
 bool rbBegin(const char* port)
 {
     bool began = false;
@@ -271,7 +626,7 @@ bool rbBegin(const char* port)
                     {
                         if(setState())
                         {
-                            imtQueueInit(); //initialise (clean) the queue
+                            imtQueueInit();
                             began = true;
                         }
                     }
@@ -281,168 +636,199 @@ bool rbBegin(const char* port)
     }
     return began;
 }
+#endif
 
+// =============================================================================
+// BASE64 ENCODING AND DECODING FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Encode data using base64 encoding
+ * 
+ * Encodes the data from srcBuffer to destBuffer.
+ * 
+ * @param srcBuffer Pointer to the source data buffer.
+ * @param srcLength Length of the source data in bytes.
+ * @param destBuffer Pointer to the destination buffer for encoded data.
+ * @param destLength Maximum length of the destination buffer.
+ * @return Number of bytes encoded, or (size_t)-1 on error.
+ */
 static size_t encodeData(const char * srcBuffer, const size_t srcLength, char * destBuffer, const size_t destLength)
 {
-    size_t encodedBytes = -1;
+    size_t encodedBytes = (size_t)-1;
     if(srcBuffer != NULL && srcLength > 0 && destBuffer != NULL && destLength > 0)
     {
-        int err = mbedtls_base64_encode(destBuffer, destLength, &encodedBytes, srcBuffer, srcLength);
+        int err = mbedtls_base64_encode((unsigned char*)destBuffer, destLength, &encodedBytes, (const unsigned char*)srcBuffer, srcLength);
         if (0 != err)
         {
-            encodedBytes = -1;
+            encodedBytes = (size_t)-1;
         }
     }
     return encodedBytes;
 }
 
+/**
+ * @brief Decode data using base64 encoding
+ * 
+ * Decodes the data from srcBuffer to destBuffer.
+ * 
+ * @param srcBuffer Pointer to the source data buffer (Base64 encoded).
+ * @param srcLength Length of the source data in bytes (including padding).
+ * @param destBuffer Pointer to the destination buffer for decoded data.
+ * @param destLength Maximum length of the destination buffer.
+ * @return Number of bytes decoded, or (size_t)-1 on error.
+ */
 static size_t decodeData(const char * srcBuffer, const size_t srcLength, char * destBuffer, const size_t destLength)
 {
-    size_t decodedBytes = -1;
+    size_t decodedBytes = (size_t)-1;
     if(srcBuffer != NULL && srcLength > 0 && destBuffer != NULL && destLength > 0)
     {
-        int err = mbedtls_base64_decode(destBuffer, destLength, &decodedBytes, srcBuffer, srcLength);
+        int err = mbedtls_base64_decode((unsigned char*)destBuffer, destLength, &decodedBytes, (const unsigned char*)srcBuffer, srcLength);
         if (0 != err)
         {
-            decodedBytes = -1;
+            decodedBytes = (size_t)-1;
         }
     }
     return decodedBytes;
 }
 
+// =============================================================================
+// CRC16 CALCULATION FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Append CRC to the data
+ * 
+ * Appends the CRC to the data.
+ * 
+ * @param buffer Pointer to the buffer to which CRC will be appended.
+ * @param length Current length of the buffer.
+ * @return true if CRC was appended successfully, false otherwise.
+ */
 static bool appendCrc(uint8_t * buffer, size_t length)
 {
     bool appended = false;
     uint16_t crc = calculateCrc(buffer, length, 0);
-    if (crc > 0)
-    {
-        crcBuffer[0] = (crc >> 8) & 0xFFU;
-        crcBuffer[1] = crc & 0xFFU;
-        memcpy(buffer + length, crcBuffer, IMT_CRC_SIZE);
-        appended = true;
-    }
-    memset(crcBuffer, 0, IMT_CRC_SIZE);
+    crcBuffer[0] = (crc >> 8) & 0xFFU;
+    crcBuffer[1] = crc & 0xFFU;
+    memcpy(buffer + length, crcBuffer, IMT_CRC_SIZE);
+    appended = true;
     return appended;
 }
 
-bool rbSendMessage(const char * data, const size_t length, const int timeout)
-{
-    bool sent = false;
-    bool queued = false;
-    if(checkProvisioning(RAW_TOPIC))
-    {
-        if (moQueuedMessages > 0)
-        {
-            imtQueueMoRemove();
-            moQueuedMessages--;
-        }
-        if(data != NULL && length > 0 && length <= IMT_PAYLOAD_SIZE - IMT_CRC_SIZE)
-        {
-            queued = imtQueueMoAdd(RAW_TOPIC, data, length);
-            if(queued)
-            {
-                sent = sendMoFromQueue(timeout);
-            }
-        }
-    }
-    return sent;
-}
+// =============================================================================
+// MESSAGE SENDING FUNCTIONS
+// =============================================================================
 
+/**
+ * @brief Send a message to the modem using the Cloudloop topic
+ * 
+ * Steps performed:
+ * 1. Check if the topic is provisioned (allowed to send messages).
+ * 2. Add the message to the MO queue.
+ * 3. Attempt to send queued messages within the given timeout.
+ * 
+ * @param topic Cloudloop topic to send the message to.
+ * @param data Pointer to the message data.
+ * @param length Length of the message data.
+ * @param timeout Maximum time to wait for the message to be sent in seconds.
+ * @return true if the message was sent successfully, false otherwise.
+ */
 bool rbSendMessageCloudloop(cloudloopTopics_t topic, const char * data, const size_t length, const int timeout)
 {
     bool sent = false;
-    bool queued = false;
     if(checkProvisioning(topic))
     {
-        if (moQueuedMessages > 0)
+        if(imtQueueMoAdd(topic, data, length))
         {
-            imtQueueMoRemove();
-            moQueuedMessages--;
-        }
-        if(data != NULL && length > 0 && length <= IMT_PAYLOAD_SIZE - IMT_CRC_SIZE)
-        {
-            queued = imtQueueMoAdd(topic, data, length);
-            if(queued)
-            {
-                sent = sendMoFromQueue(timeout);
-            }
+            sent = sendMoFromQueue(timeout);
         }
     }
     return sent;
 }
 
+/**
+ * @brief Send a message to the modem using any topic
+ * 
+ * Steps performed:
+ * 1. Check if the topic is provisioned (allowed to send messages).
+ * 2. Add the message to the MO queue.
+ * 3. Attempt to send queued messages within the given timeout.
+ * 
+ * @param topic Topic ID to send the message to.
+ * @param data Pointer to the message data.
+ * @param length Length of the message data.
+ * @param timeout Maximum time to wait for the message to be sent in seconds.
+ * @return true if the message was sent successfully, false otherwise.
+ */
 bool rbSendMessageAny(uint16_t topic, const char * data, const size_t length, const int timeout)
 {
     bool sent = false;
-    bool queued = false;
     if(checkProvisioning(topic))
     {
-        if (moQueuedMessages > 0)
+        if(imtQueueMoAdd(topic, data, length))
         {
-            imtQueueMoRemove();
-            moQueuedMessages--;
-        }
-        if(data != NULL && length > 0 && length <= IMT_PAYLOAD_SIZE - IMT_CRC_SIZE)
-        {
-            queued = imtQueueMoAdd(topic, data, length);
-            if(queued >= 0)
-            {
-                sent = sendMoFromQueue(timeout);
-            }
+            sent = sendMoFromQueue(timeout);
         }
     }
     return sent;
 }
 
+/**
+ * @brief Send a message from the MO queue
+ * 
+ * Steps performed:
+ * 1. Check if the message is valid.
+ * 2. Append the CRC to the message.
+ * 3. Send the message to the modem.
+ * 4. Wait for the response from the modem.
+ * 
+ * @param timeout Maximum time to wait for the message to be sent in seconds.
+ * @return true if the message is sent successfully, false otherwise.
+ */
 static bool sendMoFromQueue(const int timeout)
 {
     bool sent = false;
     bool started = false;
     unsigned long start = millis();
-    jsprResponse_t response;
-    int initCrc = 0;
-    int segmentStart;
-    int segmentLength;
-    int encodedBytes;
+    jsprResponse_t* response_ptr;
     imt_t * imtMo = imtQueueMoGetFirst();
 
     if(imtMo != NULL)
     {
         if(appendCrc(imtMo->buffer, imtMo->length))
         {
-            if(imtMo->buffer != NULL && imtMo->length > 0 && imtMo->topic >= IMT_MIN_TOPIC_ID 
+            if(imtMo->buffer != NULL && imtMo->length > 0 && imtMo->topic >= IMT_MIN_TOPIC_ID
             && imtMo->topic <= IMT_MAX_TOPIC_ID)
             {
                 if(jsprPutMessageOriginate(imtMo->topic, imtMo->length + IMT_CRC_SIZE))
                 {
-                    if(receiveJspr(&response, "messageOriginate"))
+                    response_ptr = receiveJspr(2000);
+                    if(response_ptr != NULL && response_ptr->code == JSPR_RC_NO_ERROR)
                     {
-                        if(JSPR_RC_NO_ERROR == response.code)
+                        jsprMessageOriginate_t messageOriginate;
+                        parseJsprPutMessageOriginate(response_ptr->json, &messageOriginate);
+                        imtMo->id = messageOriginate.messageId;
+                        started = true;
+                        while (true)
                         {
-                            jsprMessageOriginate_t messageOriginate;
-                            parseJsprPutMessageOriginate(response.json, &messageOriginate);
-                            imtMo->id = messageOriginate.messageId;
-                            started = true;
-                            while (true)
+                            rbPoll();
+                            if(moDropped)
                             {
-                                rbPoll();
-                                if(moDropped)
-                                {
-                                    sent = false;
-                                    moDropped = false;
-                                    break;
-                                }
-                                else if (moSent)
-                                {
-                                    sent = true;
-                                    moSent = false;
-                                    break;
-                                }
-                                else if ((millis() - start) >= (timeout * 1000UL))
-                                {
-                                    sent = false;
-                                    break;
-                                }
+                                sent = false;
+                                moDropped = false;
+                                break;
+                            }
+                            else if (moSent)
+                            {
+                                sent = true;
+                                moSent = false;
+                                break;
+                            }
+                            else if ((millis() - start) >= (timeout * 1000UL))
+                            {
+                                sent = false;
+                                break;
                             }
                         }
                     }
@@ -452,12 +838,28 @@ static bool sendMoFromQueue(const int timeout)
 
         if(!started)
         {
-            imtQueueMoRemove(); //failed one of the checks, drop message
+            imtQueueMoRemove();
         }
     }
     return sent;
 }
 
+// =============================================================================
+// MESSAGE RECEIVING FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Receive a message from the modem
+ * 
+ * Steps performed:
+ * 1. Check if the modem is listening for messages.
+ * 2. Get the first message from the MO queue.
+ * 3. Check if the message is valid.
+ * 4. Copy the message to the buffer.
+ * 
+ * @param buffer Pointer to a buffer where the message will be stored.
+ * @return Length of the message (excluding CRC).
+ */
 size_t rbReceiveMessage(char ** buffer)
 {
     size_t length = 0;
@@ -468,19 +870,32 @@ size_t rbReceiveMessage(char ** buffer)
         if(buffer != NULL && imtMt != NULL)
         {
             if(imtMt->buffer != NULL && imtMt->length > 0 && imtMt->topic >= IMT_MIN_TOPIC_ID &&
-                imtMt->topic <= IMT_MAX_TOPIC_ID) //check head is valid mt
+                imtMt->topic <= IMT_MAX_TOPIC_ID)
             {
                 length = (imtMt->length - IMT_CRC_SIZE);
-                imtMt->buffer[length] = '\0'; //remove crc
-                *buffer = imtMt->buffer;
-                imtMt->readyToProcess = false; //finished processing
+                imtMt->buffer[length] = '\0';
+                *buffer = (char*)imtMt->buffer;
+                imtMt->readyToProcess = false;
             }
         }
     }
     return length;
 }
 
-size_t rbReceiveMessageWithTopic(char ** buffer, uint16_t topic)
+/**
+ * @brief Receive a message from the modem with the topic
+ * 
+ * Steps performed:
+ * 1. Check if the modem is listening for messages.
+ * 2. Get the first message from the MO queue.
+ * 3. Check if the message is valid.
+ * 4. Copy the message to the buffer.
+ * 
+ * @param buffer Pointer to a buffer where the message will be stored.
+ * @param topic Pointer to a variable where the topic ID will be stored.
+ * @return Length of the message (excluding CRC).
+ */
+size_t rbReceiveMessageWithTopic(char ** buffer, uint16_t * topic)
 {
     size_t length = 0;
 
@@ -490,19 +905,30 @@ size_t rbReceiveMessageWithTopic(char ** buffer, uint16_t topic)
         if(buffer != NULL && imtMt != NULL)
         {
             if(imtMt->buffer != NULL && imtMt->length > 0 && imtMt->topic >= IMT_MIN_TOPIC_ID &&
-                imtMt->topic <= IMT_MAX_TOPIC_ID) //check head is valid mt
+                imtMt->topic <= IMT_MAX_TOPIC_ID)
             {
                 length = (imtMt->length - IMT_CRC_SIZE);
-                imtMt->buffer[length] = '\0'; //remove crc
-                *buffer = imtMt->buffer;
-                topic = imtMt->topic;
-                imtMt->readyToProcess = false; //finished processing
+                imtMt->buffer[length] = '\0';
+                *buffer = (char*)imtMt->buffer;
+                *topic = imtMt->topic;
+                imtMt->readyToProcess = false;
             }
         }
     }
     return length;
 }
 
+/**
+ * @brief Listen for a Mobile-Terminated (MT) message from the modem.
+ * 
+ * Steps performed:
+ * 1. Poll the modem to update message status.
+ * 2. Get the first message from the MT queue.
+ * 3. Check if the message is ready to process.
+ * 4. Wait until the message is either received or dropped.
+ * 
+ * @return true if an MT message was successfully received, false if dropped or none.
+ */
 static bool listenForMt(void)
 {
     bool received = false;
@@ -534,30 +960,60 @@ static bool listenForMt(void)
     return received;
 }
 
+// =============================================================================
+// ASYNCHRONOUS MESSAGE SENDING FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Start sending the first Mobile-Originated (MO) message from the queue asynchronously.
+ *
+ * This function attempts to send the first message in the MO queue without blocking
+ * for the entire transfer. It performs the following steps:
+ *
+ * 1. Retrieve the first message from the MO queue.
+ * 2. Append CRC to the message buffer.
+ * 3. Validate the message length, buffer, and topic ID.
+ * 4. Send a "message originate" request to the modem once.
+ * 5. Listen for up to 3 seconds for the correct response message (ignore others).
+ * 6. If the correct response is received:
+ *    - Parse the response to get the assigned message ID.
+ *    - Mark the sending as started.
+ * 7. If sending did not start successfully, remove the message from the queue.
+ *
+ * @return true if the message sending process was successfully started, false otherwise.
+ */
 static bool sendMoFromQueueAsync(void)
 {
     bool started = false;
-    jsprResponse_t response;
+    jsprResponse_t* response_ptr;
     imt_t * imtMo = imtQueueMoGetFirst();
 
     if(imtMo != NULL)
     {
         if(appendCrc(imtMo->buffer, imtMo->length))
         {
-            if(imtMo->buffer != NULL && imtMo->length > 0 && imtMo->topic >= IMT_MIN_TOPIC_ID 
+            if(imtMo->buffer != NULL && imtMo->length > 0 && imtMo->topic >= IMT_MIN_TOPIC_ID
             && imtMo->topic <= IMT_MAX_TOPIC_ID)
             {
+                // Send the request to originate a message ONCE.
                 if(jsprPutMessageOriginate(imtMo->topic, imtMo->length + IMT_CRC_SIZE))
                 {
-                    if(receiveJspr(&response, "messageOriginate"))
+                    uint32_t startTime = millis();
+                    // Now, listen for up to 3 seconds for the correct response, ignoring others.
+                    while ((millis() - startTime) < 3000)
                     {
-                        if(JSPR_RC_NO_ERROR == response.code)
+                        response_ptr = receiveJspr(500);
+                        if(response_ptr != NULL && response_ptr->code == JSPR_RC_NO_ERROR &&
+                           strcmp(response_ptr->target, "messageOriginate") == 0)
                         {
+                            // This is the correct response. Parse it and set the ID.
                             jsprMessageOriginate_t messageOriginate;
-                            parseJsprPutMessageOriginate(response.json, &messageOriginate);
+                            parseJsprPutMessageOriginate(response_ptr->json, &messageOriginate);
                             imtMo->id = messageOriginate.messageId;
                             started = true;
+                            break; // Success, exit the loop.
                         }
+                        // If we received another message, ignore it and continue listening.
                     }
                 }
             }
@@ -565,22 +1021,36 @@ static bool sendMoFromQueueAsync(void)
 
         if(!started)
         {
-            imtQueueMoRemove(); //failed one of the checks, drop message
+            imtQueueMoRemove();
         }
     }
     return started;
 }
 
+/**
+ * @brief Queue a Mobile-Originated (MO) message for asynchronous sending.
+ *
+ * This function performs the following steps:
+ * 1. Checks if the given topic is provisioned (allowed to send messages).
+ * 2. Validates that the data pointer is not NULL and the length is within allowed limits.
+ * 3. Adds the message to the internal MO queue.
+ * 4. If no other messages are queued, starts sending the message asynchronously
+ *    using `sendMoFromQueueAsync()`.
+ * 5. Increments the count of queued messages (`moQueuedMessages`).
+ *
+ * @param topic Topic ID to send the message to.
+ * @param data Pointer to the message data.
+ * @param length Length of the message data.
+ * @return true if the message was successfully queued and sending started, false otherwise.
+ */
 bool rbSendMessageAsync(uint16_t topic, const char * data, const size_t length)
 {
     bool queuedToSend = false;
-    bool queued = false;
     if(checkProvisioning(topic))
     {
         if(data != NULL && length > 0 && length <= IMT_PAYLOAD_SIZE - IMT_CRC_SIZE)
         {
-            queued = imtQueueMoAdd(topic, data, length);
-            if(queued)
+            if(imtQueueMoAdd(topic, data, length))
             {
                 if (moQueuedMessages == 0)
                 {
@@ -597,6 +1067,25 @@ bool rbSendMessageAsync(uint16_t topic, const char * data, const size_t length)
     return queuedToSend;
 }
 
+// =============================================================================
+// ASYNCHRONOUS MESSAGE RECEIVING FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Retrieve the first ready Mobile-Terminated (MT) message from the queue asynchronously.
+ *
+ * This function performs the following steps:
+ * 1. Gets the first MT message from the queue.
+ * 2. Checks if the message is marked as ready.
+ * 3. Validates the message buffer, length, and topic ID.
+ * 4. If valid, sets the output pointer to the message buffer (excluding CRC).
+ * 5. Null-terminates the message for string-safe usage.
+ * 6. Marks the message as no longer ready to process.
+ *
+ * @param buffer Pointer to a buffer where the message will be stored.
+ * @return The length of the message (excluding CRC) if a message is ready, 0 otherwise.
+ */
+
 size_t rbReceiveMessageAsync(char ** buffer)
 {
     size_t length = 0;
@@ -609,12 +1098,12 @@ size_t rbReceiveMessageAsync(char ** buffer)
             if(buffer != NULL)
             {
                 if(imtMt->buffer != NULL && imtMt->length > 0 && imtMt->topic >= IMT_MIN_TOPIC_ID &&
-                    imtMt->topic <= IMT_MAX_TOPIC_ID && imtMt->ready) //check head is valid mt
+                    imtMt->topic <= IMT_MAX_TOPIC_ID && imtMt->ready)
                 {
                     length = (imtMt->length - IMT_CRC_SIZE);
-                    imtMt->buffer[length] = '\0'; //remove crc
-                    *buffer = imtMt->buffer;
-                    imtMt->readyToProcess = false; //finished processing
+                    imtMt->buffer[length] = '\0';
+                    *buffer = (char*)imtMt->buffer;
+                    imtMt->readyToProcess = false;
                 }
             }
         }
@@ -622,16 +1111,37 @@ size_t rbReceiveMessageAsync(char ** buffer)
     return length;
 }
 
+/**
+ * @brief Lock the receive queue to prevent new messages from being added.
+ * 
+ * This function is used to prevent race conditions when receiving messages
+ * asynchronously. It locks the receive queue, preventing new messages from
+ * being added to the `imtQueueMtAdd` function.
+ */
 void rbReceiveLockAsync(void)
 {
     imtQueueMtLock(true);
 }
 
+/**
+ * @brief Unlock the receive queue to allow new messages to be added.
+ * 
+ * This function is used to re-enable the receive queue after it has been
+ * locked by `rbReceiveLockAsync`.
+ */
 void rbReceiveUnlockAsync(void)
 {
     imtQueueMtLock(false);
 }
 
+/**
+ * @brief Acknowledge the receipt of a message from the receive queue.
+ * 
+ * This function removes the first message from the MT queue and
+ * acknowledges its receipt to the modem.
+ * 
+ * @return true if the message was successfully acknowledged, false otherwise.
+ */
 bool rbAcknowledgeReceiveHeadAsync(void)
 {
     bool acknowledged = false;
@@ -642,12 +1152,24 @@ bool rbAcknowledgeReceiveHeadAsync(void)
     return acknowledged;
 }
 
+// =============================================================================
+// ASYNCHRONOUS MESSAGE PROCESSING
+// =============================================================================
+
+/**
+ * @brief Check if there are any messages in the MO queue that need to be sent.
+ * 
+ * If there are messages in the MO queue, it attempts to send the first one
+ * asynchronously using `sendMoFromQueueAsync()`.
+ * 
+ * @return true if a message was successfully sent, false otherwise.
+ */
 static bool checkMoQueue(void)
 {
     bool success = false;
-    if(moQueuedMessages > 0) //check if any more messages are queued
+    if(moQueuedMessages > 0)
     {
-        if(sendMoFromQueueAsync()) //send the next message
+        if(sendMoFromQueueAsync())
         {
             success = true;
         }
@@ -655,134 +1177,193 @@ static bool checkMoQueue(void)
     return success;
 }
 
+/**
+ * @brief Poll the modem and handle incoming and outgoing messages asynchronously.
+ *
+ * This function is the main polling loop for the messaging system. It performs
+ * the following tasks:
+ *
+ * 1. Calls `receiveJspr()` to check for new JSPR messages from the modem.
+ * 2. Processes Mobile-Originated (MO) messages:
+ *    - Handles `messageOriginateSegment` unsolicited messages by encoding the
+ *      segment in Base64 and sending it back via `jsprPutMessageOriginateSegment`.
+ *    - Handles errors in `messageOriginateSegment` by notifying callbacks or
+ *      marking the message as dropped.
+ *    - Handles `messageOriginateStatus` unsolicited messages to confirm delivery
+ *      or detect failure, updating flags or calling callbacks as needed.
+ *    - Updates the MO queue and queued message count accordingly.
+ * 3. Processes Mobile-Terminated (MT) messages:
+ *    - Handles `messageTerminate` messages by adding them to the MT queue and
+ *      marking them ready to process.
+ *    - Handles `messageTerminateSegment` messages by decoding Base64 segments
+ *      into the MT buffer and tracking the total message length.
+ *    - Handles `messageTerminateStatus` messages to mark the MT message as complete
+ *      or failed, calling the appropriate callbacks or setting flags.
+ * 4. Handles unsolicited `constellationState` messages by parsing signal data
+ *    and invoking the corresponding callback.
+ *
+ * The function ensures proper asynchronous message handling, queue management,
+ * and integration with user-provided callbacks.
+ */
 void rbPoll(void)
 {
-    jsprResponse_t response;
-    int segmentStart;
-    int segmentStartMt;
-    int segmentLength;
-    int segmentLengthMt;
-    int encodedBytes;
-    int decodedBytes;
-    bool mtQueued;
-    imt_t * imtMo = imtQueueMoGetFirst();
-    if(context.serialPeek() > 0)
+    jsprResponse_t* response_ptr;
+    size_t decodedBytes;
+
+    response_ptr = receiveJspr(100);
+    if(response_ptr != NULL)
     {
-        if(receiveJspr(&response, NULL))
+        imt_t * imtMo = imtQueueMoGetFirst();
+        //MO JSPR
+        if(imtMo != NULL)
         {
-            //MO JSPR
-            if(imtMo != NULL)
+            if(response_ptr->code == JSPR_RC_UNSOLICITED_MESSAGE && strcmp(response_ptr->target, "messageOriginateSegment") == 0)
             {
-                if(JSPR_RC_UNSOLICITED_MESSAGE == response.code && strcmp(response.target, "messageOriginateSegment") == 0)
+                jsprMessageOriginateSegment_t messageOriginateSegment;
+                parseJsprUnsMessageOriginateSegment(response_ptr->json, &messageOriginateSegment);
+                if(messageOriginateSegment.messageId == imtMo->id &&
+                messageOriginateSegment.topic == imtMo->topic)
                 {
-                    jsprMessageOriginateSegment_t messageOriginateSegment;
-                    parseJsprUnsMessageOriginateSegment(response.json, &messageOriginateSegment);
-                    if(messageOriginateSegment.messageId == imtMo->id && 
-                    messageOriginateSegment.topic == imtMo->topic)
+                    size_t encodedBytes = encodeData((char*)imtMo->buffer + messageOriginateSegment.segmentStart,
+                    messageOriginateSegment.segmentLength, (char*)base64Buffer, BASE64_TEMP_BUFFER);
+                    if(0 < encodedBytes)
                     {
-                        segmentStart = messageOriginateSegment.segmentStart;
-                        segmentLength = messageOriginateSegment.segmentLength;
-                        encodedBytes = encodeData(imtMo->buffer + segmentStart, 
-                        segmentLength, base64Buffer, BASE64_TEMP_BUFFER);
-                        if(0 < encodedBytes)
-                        {
-                            jsprMessageOriginate_t messageOriginate;
-                            messageOriginate.messageId = imtMo->id;
-                            messageOriginate.topic = imtMo->topic;
-                            jsprPutMessageOriginateSegment(&messageOriginate, segmentLength, 
-                            segmentStart, base64Buffer);
-                        }
+                        jsprMessageOriginate_t messageOriginate;
+                        messageOriginate.messageId = imtMo->id;
+                        messageOriginate.topic = imtMo->topic;
+                        jsprPutMessageOriginateSegment(&messageOriginate, messageOriginateSegment.segmentLength,
+                        messageOriginateSegment.segmentStart, (char*)base64Buffer);
                     }
-                }
-                if(JSPR_RC_NO_ERROR != response.code && JSPR_RC_UNSOLICITED_MESSAGE != response.code && strcmp(response.target, "messageOriginateSegment") == 0)
-                {
-                    if(rbCallbacks && rbCallbacks->moMessageComplete)
-                    {
-                        rbCallbacks->moMessageComplete(imtMo->id, RB_MSG_STATUS_FAIL);
-                    }
-                    else
-                    {
-                        moDropped = true;
-                    }
-                    imtQueueMoRemove(); //drop message
-                    moQueuedMessages -= 1;
-                    checkMoQueue();
-                }
-                if(JSPR_RC_UNSOLICITED_MESSAGE == response.code && strcmp(response.target, "messageOriginateStatus") == 0)
-                {
-                    jsprMessageOriginateStatus_t messageOriginateStatus;
-                    if(parseJsprUnsMessageOriginateStatus(response.json, &messageOriginateStatus))
-                    {
-                        if(imtMo->id == messageOriginateStatus.messageId)
-                        {
-                            if(messageOriginateStatus.finalMoStatus == MO_ACK_RECEIVED_MOS)
-                            {
-                                if(rbCallbacks && rbCallbacks->moMessageComplete)
-                                {
-                                    rbCallbacks->moMessageComplete(imtMo->id, RB_MSG_STATUS_OK);
-                                }
-                                else
-                                {
-                                    moSent = true;
-                                }
-                            }
-                            else
-                            {
-                                if(rbCallbacks && rbCallbacks->moMessageComplete)
-                                {
-                                    rbCallbacks->moMessageComplete(imtMo->id, RB_MSG_STATUS_FAIL);
-                                }
-                                else
-                                {
-                                    moDropped = true;
-                                }
-                            }
-                        }
-                    }
-                    imtQueueMoRemove();
-                    moQueuedMessages -= 1;
-                    checkMoQueue();
                 }
             }
-            //MT JSPR
-            if(JSPR_RC_UNSOLICITED_MESSAGE == response.code && strcmp(response.target, "messageTerminate") == 0)
+            if(response_ptr->code != JSPR_RC_NO_ERROR && response_ptr->code != JSPR_RC_UNSOLICITED_MESSAGE && strcmp(response_ptr->target, "messageOriginateSegment") == 0)
             {
-                jsprMessageTerminate_t messageTerminate;
-                parseJsprUnsMessageTerminate(response.json, &messageTerminate);
-                mtQueued = imtQueueMtAdd(messageTerminate.topic, messageTerminate.messageId, messageTerminate.messageLengthMax);
-                imt_t * imtMt = imtQueueMtGetLast();
-                if (mtQueued) //returns -1 if que is full, no free spots to store mt
+                if(rbCallbacks && rbCallbacks->moMessageComplete)
                 {
-                    if(imtMt != NULL)
-                    {
-                        imtMt->readyToProcess = true;
-                    }
+                    rbCallbacks->moMessageComplete(imtMo->id, RB_MSG_STATUS_FAIL);
                 }
                 else
                 {
-                    if(rbCallbacks && rbCallbacks->mtMessageComplete)
+                    moDropped = true;
+                }
+                imtQueueMoRemove();
+                moQueuedMessages -= 1;
+                checkMoQueue();
+            }
+            if(response_ptr->code == JSPR_RC_UNSOLICITED_MESSAGE && strcmp(response_ptr->target, "messageOriginateStatus") == 0)
+            {
+                jsprMessageOriginateStatus_t messageOriginateStatus;
+                if(parseJsprUnsMessageOriginateStatus(response_ptr->json, &messageOriginateStatus))
+                {
+                    if(imtMo->id == messageOriginateStatus.messageId)
                     {
-                        rbCallbacks->mtMessageComplete(messageTerminate.messageId, RB_MSG_STATUS_FAIL);
+                        if(messageOriginateStatus.finalMoStatus == MO_ACK_RECEIVED_MOS)
+                        {
+                            if(rbCallbacks && rbCallbacks->moMessageComplete)
+                            {
+                                rbCallbacks->moMessageComplete(imtMo->id, RB_MSG_STATUS_OK);
+                            }
+                            else
+                            {
+                                moSent = true;
+                            }
+                        }
+                        else
+                        {
+                            if(rbCallbacks && rbCallbacks->moMessageComplete)
+                            {
+                                rbCallbacks->moMessageComplete(imtMo->id, RB_MSG_STATUS_FAIL);
+                            }
+                            else
+                            {
+                                moDropped = true;
+                            }
+                        }
                     }
                 }
+                imtQueueMoRemove();
+                moQueuedMessages -= 1;
+                checkMoQueue();
             }
-            if(JSPR_RC_UNSOLICITED_MESSAGE == response.code && strcmp(response.target, "messageTerminateSegment") == 0)
+        }
+        //MT JSPR
+        if(response_ptr->code == JSPR_RC_UNSOLICITED_MESSAGE && strcmp(response_ptr->target, "messageTerminate") == 0)
+        {
+            jsprMessageTerminate_t messageTerminate;
+            parseJsprUnsMessageTerminate(response_ptr->json, &messageTerminate);
+            if (imtQueueMtAdd(messageTerminate.topic, messageTerminate.messageId, messageTerminate.messageLengthMax))
             {
                 imt_t * imtMt = imtQueueMtGetLast();
                 if(imtMt != NULL)
                 {
-                    if(imtMt->readyToProcess)
+                    imtMt->readyToProcess = true;
+                }
+            }
+            else
+            {
+                if(rbCallbacks && rbCallbacks->mtMessageComplete)
+                {
+                    rbCallbacks->mtMessageComplete(messageTerminate.messageId, RB_MSG_STATUS_FAIL);
+                }
+            }
+        }
+        if(response_ptr->code == JSPR_RC_UNSOLICITED_MESSAGE && strcmp(response_ptr->target, "messageTerminateSegment") == 0)
+        {
+            imt_t * imtMt = imtQueueMtGetLast();
+            if(imtMt != NULL)
+            {
+                if(imtMt->readyToProcess)
+                {
+                    jsprMessageTerminateSegment_t messageTerminateSegment;
+                    parseJsprUnsMessageTerminateSegment(response_ptr->json, &messageTerminateSegment);
+                    if(imtMt->id == messageTerminateSegment.messageId)
                     {
-                        jsprMessageTerminateSegment_t messageTerminateSegment;
-                        parseJsprUnsMessageTerminateSegment(response.json, &messageTerminateSegment);
-                        segmentStartMt = messageTerminateSegment.segmentStart;
-                        segmentLengthMt = messageTerminateSegment.segmentLength;
-                        if(imtMt->id == messageTerminateSegment.messageId)
+                        decodedBytes = decodeData(messageTerminateSegment.data, messageTerminateSegment.dataLength,
+                        (char*)imtMt->buffer + messageTerminateSegment.segmentStart, messageTerminateSegment.segmentLength);
+                        messageLengthAsync += messageTerminateSegment.segmentLength;
+                        if(decodedBytes == (size_t)-1)
                         {
-                            decodedBytes = decodeData(messageTerminateSegment.data, messageTerminateSegment.dataLength, 
-                            imtMt->buffer + segmentStartMt, segmentLengthMt);
-                            messageLengthAsync += segmentLengthMt;
-                            if(0 > decodedBytes)
+                            if(rbCallbacks && rbCallbacks->mtMessageComplete)
+                            {
+                                rbCallbacks->mtMessageComplete(imtMt->id, RB_MSG_STATUS_FAIL);
+                            }
+                            else
+                            {
+                                mtDropped = true;
+                            }
+                            imtQueueMtRemove();
+                        }
+                    }
+                }
+            }
+        }
+        if(response_ptr->code == JSPR_RC_UNSOLICITED_MESSAGE && strcmp(response_ptr->target, "messageTerminateStatus") == 0)
+        {
+            imt_t * imtMt = imtQueueMtGetLast();
+            if(imtMt != NULL)
+            {
+                if(imtMt->readyToProcess)
+                {
+                    jsprMessageTerminateStatus_t messageTerminateStatus;
+                    if(parseJsprUnsMessageTerminateStatus(response_ptr->json, &messageTerminateStatus))
+                    {
+                        if(imtMt->id == messageTerminateStatus.messageId)
+                        {
+                            if(messageTerminateStatus.finalMtStatus == COMPLETE)
+                            {
+                                imtMt->length = messageLengthAsync;
+                                messageLengthAsync = 0;
+                                imtMt->ready = true;
+                                if(rbCallbacks && rbCallbacks->mtMessageComplete)
+                                {
+                                    rbCallbacks->mtMessageComplete(imtMt->id, RB_MSG_STATUS_OK);
+                                }
+                                else
+                                {
+                                    mtReceived = true;
+                                }
+                            }
+                            else
                             {
                                 if(rbCallbacks && rbCallbacks->mtMessageComplete)
                                 {
@@ -792,104 +1373,114 @@ void rbPoll(void)
                                 {
                                     mtDropped = true;
                                 }
-                                imtQueueMtRemove();
                             }
                         }
                     }
                 }
             }
-            if(JSPR_RC_UNSOLICITED_MESSAGE == response.code && strcmp(response.target, "messageTerminateStatus") == 0)
+        }
+        if(response_ptr->code == JSPR_RC_UNSOLICITED_MESSAGE && strcmp(response_ptr->target, "constellationState") == 0)
+        {
+            jsprConstellationState_t constellationState;
+            if(parseJsprGetSignal(response_ptr->json, &constellationState))
             {
-                imt_t * imtMt = imtQueueMtGetLast();
-                if(imtMt != NULL)
+                if(rbCallbacks && rbCallbacks->constellationState)
                 {
-                    if(imtMt->readyToProcess)
-                    {
-                        jsprMessageTerminateStatus_t messageTerminateStatus;
-                        if(parseJsprUnsMessageTerminateStatus(response.json, &messageTerminateStatus))
-                        {
-                            if(imtMt->id == messageTerminateStatus.messageId)
-                            {
-                                if(messageTerminateStatus.finalMtStatus == COMPLETE)
-                                {
-                                    imtMt->length = messageLengthAsync;
-                                    messageLengthAsync = 0;
-                                    imtMt->ready = true;
-                                    if(rbCallbacks && rbCallbacks->mtMessageComplete)
-                                    {
-                                        rbCallbacks->mtMessageComplete(imtMt->id, RB_MSG_STATUS_OK);
-                                    }
-                                    else
-                                    {
-                                        mtReceived = true;
-                                    }
-                                }
-                                else
-                                {
-                                    if(rbCallbacks && rbCallbacks->mtMessageComplete)
-                                    {
-                                        rbCallbacks->mtMessageComplete(imtMt->id, RB_MSG_STATUS_FAIL);
-                                    }
-                                    else
-                                    {
-                                        mtDropped = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            if(JSPR_RC_UNSOLICITED_MESSAGE == response.code && strcmp(response.target, "constellationState") == 0)
-            {
-                jsprConstellationState_t constellationState;
-                if(parseJsprGetSignal(response.json, &constellationState))
-                {
-                    if(rbCallbacks && rbCallbacks->constellationState)
-                    {
-                        rbCallbacks->constellationState(&constellationState);
-                    }
+                    rbCallbacks->constellationState(&constellationState);
                 }
             }
         }
     }
 }
 
+// =============================================================================
+// SIGNAL STRENGTH FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Retrieve the current signal strength from the modem.
+ *
+ * This function performs the following steps:
+ * 1. Sends a request to the modem to get the current signal (constellation) state.
+ * 2. Waits up to 2000 ms for a response using `receiveJspr()`.
+ * 3. Checks if the response is valid and corresponds to "constellationState".
+ * 4. Parses the JSON response to extract the signal information.
+ * 5. Returns the signal strength as an integer representing the number of bars (0–5).
+ *
+ * @return int8_t Signal strength in bars (0–5). Returns -1 if the signal cannot
+ *                be determined or if an error occurs.
+ */
+
 int8_t rbGetSignal(void)
 {
     int8_t signal = -1;
-    jsprResponse_t response;
+    jsprResponse_t* response_ptr;
     jsprGetSignal();
-    waitForJsprMessage(&response, "constellationState", JSPR_RC_NO_ERROR, 1);
-    if(JSPR_RC_NO_ERROR == response.code && strcmp(response.target, "constellationState") == 0)
+
+    response_ptr = receiveJspr(2000);
+    if (response_ptr != NULL)
     {
-        jsprConstellationState_t conState;
-        if(parseJsprGetSignal(response.json, &conState))
+        if(response_ptr->code == JSPR_RC_NO_ERROR && strcmp(response_ptr->target, "constellationState") == 0)
         {
-            if(conState.signalBars >= 0 && conState.signalBars <= 5)
+            jsprConstellationState_t conState;
+            if(parseJsprGetSignal(response_ptr->json, &conState))
             {
-                signal = conState.signalBars;
+                if(conState.signalBars >= 0 && conState.signalBars <= 5)
+                {
+                    signal = conState.signalBars;
+                }
             }
         }
     }
     return signal;
 }
 
+// =============================================================================
+// HARDWARE INFORMATION FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Retrieve hardware information from the modem.
+ *
+ * This function performs the following steps:
+ * 1. Sends a request to the modem to get hardware information via `jsprGetHwInfo()`.
+ * 2. Waits up to 2000 ms for a response using `receiveJspr()`.
+ * 3. Checks if the response is valid and corresponds to "hwInfo".
+ * 4. Parses the JSON response into the provided `jsprHwInfo_t` structure.
+ * 5. Returns true if the hardware information was successfully retrieved and parsed,
+ *    false otherwise.
+ *
+ * @param hwInfo Pointer to a structure to populate with hardware information.
+ * @return true if hardware info was successfully retrieved and parsed, false otherwise.
+ */
+
 static bool getHwInfo(jsprHwInfo_t * hwInfo)
 {
     bool populated = false;
-    jsprResponse_t response;
+    jsprResponse_t* response_ptr;
     jsprGetHwInfo();
-    receiveJspr(&response, "hwInfo");
-    if(JSPR_RC_NO_ERROR == response.code && strcmp(response.target, "hwInfo") == 0)
+    response_ptr = receiveJspr(2000);
+    if(response_ptr != NULL)
     {
-        if(parseJsprGetHwInfo(response.json, hwInfo))
+        if(response_ptr->code == JSPR_RC_NO_ERROR && strcmp(response_ptr->target, "hwInfo") == 0)
         {
-            populated = true;
+            if(parseJsprGetHwInfo(response_ptr->json, hwInfo))
+            {
+                populated = true;
+            }
         }
     }
     return populated;
 }
+
+/**
+ * @brief Retrieve the IMEI of the modem.
+ *
+ * This function fetches the modem's hardware information using `getHwInfo()`
+ * and returns a pointer to the IMEI string stored in the `hwInfo` structure.
+ *
+ * @return char* Pointer to the modem's IMEI string, or NULL if it cannot be retrieved.
+ */
 
 char * rbGetImei(void)
 {
@@ -901,6 +1492,14 @@ char * rbGetImei(void)
     return imei;
 }
 
+/**
+ * @brief Retrieve the hardware version of the modem.
+ *
+ * This function fetches the modem's hardware information using `getHwInfo()`
+ * and returns a pointer to the hardware version string stored in the `hwInfo` structure.
+ *
+ * @return char* Pointer to the modem's hardware version string, or NULL if it cannot be retrieved.
+ */
 char * rbGetHwVersion(void)
 {
     char * hwVersion = NULL;
@@ -911,6 +1510,14 @@ char * rbGetHwVersion(void)
     return hwVersion;
 }
 
+/**
+ * @brief Retrieve the serial number of the modem.
+ *
+ * This function fetches the modem's hardware information using `getHwInfo()`
+ * and returns a pointer to the serial number string stored in the `hwInfo` structure.
+ *
+ * @return char* Pointer to the modem's serial number string, or NULL if it cannot be retrieved.
+ */
 char * rbGetSerialNumber(void)
 {
     char * serialNumber = NULL;
@@ -921,10 +1528,18 @@ char * rbGetSerialNumber(void)
     return serialNumber;
 }
 
+/**
+ * @brief Retrieve the current board temperature of the modem.
+ *
+ * This function fetches the modem's hardware information using `getHwInfo()`
+ * and returns the board temperature in degrees Celsius.
+ *
+ * @return int8_t Board temperature if available; returns -100 if the temperature
+ *                cannot be retrieved.
+ */
 int8_t rbGetBoardTemp(void)
 {
-    int8_t boardTemp = -100; //needs to be some value that the temp can't be
-    jsprHwInfo_t hwInfo;
+    int8_t boardTemp = -100;
     if(getHwInfo(&hwInfo))
     {
         boardTemp = hwInfo.boardTemp;
@@ -932,22 +1547,51 @@ int8_t rbGetBoardTemp(void)
     return boardTemp;
 }
 
+// =============================================================================
+// SIM CARD STATUS FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Retrieve the SIM card status from the modem.
+ *
+ * This function performs the following steps:
+ * 1. Sends a request to the modem to get SIM status via `jsprGetSimStatus()`.
+ * 2. Waits up to 2000 ms for a response using `receiveJspr()`.
+ * 3. Checks if the response is valid and corresponds to "simStatus".
+ * 4. Parses the JSON response into the provided `jsprSimStatus_t` structure.
+ * 5. Returns true if the SIM status was successfully retrieved and parsed,
+ *    false otherwise.
+ *
+ * @param simStatus Pointer to a structure to populate with SIM status information.
+ * @return true if SIM status was successfully retrieved and parsed, false otherwise.
+ */
 static bool getSimStatus(jsprSimStatus_t * simStatus)
 {
     bool populated = false;
-    jsprResponse_t response;
+    jsprResponse_t* response_ptr;
     jsprGetSimStatus();
-    receiveJspr(&response, "simStatus");
-    if(JSPR_RC_NO_ERROR == response.code && strcmp(response.target, "simStatus") == 0)
+    response_ptr = receiveJspr(2000);
+    if(response_ptr != NULL)
     {
-        if(parseJsprGetSimStatus(response.json, simStatus))
+        if(response_ptr->code == JSPR_RC_NO_ERROR && strcmp(response_ptr->target, "simStatus") == 0)
         {
-            populated = true;
+            if(parseJsprGetSimStatus(response_ptr->json, simStatus))
+            {
+                populated = true;
+            }
         }
     }
     return populated;
 }
 
+/**
+ * @brief Check if a SIM card is present in the modem.
+ *
+ * This function retrieves the SIM status using `getSimStatus()` and returns
+ * whether a SIM card is currently present.
+ *
+ * @return true if a SIM card is present, false otherwise.
+ */
 bool rbGetCardPresent(void)
 {
     bool cardPresent = false;
@@ -958,6 +1602,14 @@ bool rbGetCardPresent(void)
     return cardPresent;
 }
 
+/**
+ * @brief Check if the SIM card is connected to the network.
+ *
+ * This function retrieves the SIM status using `getSimStatus()` and returns
+ * whether the SIM is currently connected.
+ *
+ * @return true if the SIM is connected, false otherwise.
+ */
 bool rbGetSimConnected(void)
 {
     bool simConnected = false;
@@ -968,6 +1620,14 @@ bool rbGetSimConnected(void)
     return simConnected;
 }
 
+/**
+ * @brief Retrieve the ICCID (Integrated Circuit Card Identifier) of the SIM card.
+ *
+ * This function fetches the SIM status using `getSimStatus()` and returns a pointer
+ * to the ICCID string stored in the `simStatus` structure.
+ *
+ * @return char* Pointer to the ICCID string, or NULL if it cannot be retrieved.
+ */
 char * rbGetIccid(void)
 {
     char * iccid = NULL;
@@ -978,32 +1638,53 @@ char * rbGetIccid(void)
     return iccid;
 }
 
+// =============================================================================
+// FIRMWARE INFORMATION FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Retrieve firmware information from the modem.
+ *
+ * This function requests the firmware info for the primary boot source using `jsprGetFirmware()`,
+ * waits for a response via `receiveJspr()`, and parses it into the provided `fwInfo` structure.
+ *
+ * @param fwInfo Pointer to a structure to populate with firmware information.
+ * @return true if the firmware information was successfully retrieved and parsed, false otherwise.
+ */
 static bool getFirmwareInfo(jsprFirmwareInfo_t * fwInfo)
 {
     bool populated = false;
-    jsprResponse_t response;
+    jsprResponse_t* response_ptr;
     jsprGetFirmware(JSPR_BOOT_SOURCE_PRIMARY);
-    receiveJspr(&response, "firmware");
-    if(JSPR_RC_NO_ERROR == response.code && strcmp(response.target, "firmware") == 0)
+    response_ptr = receiveJspr(2000);
+    if(response_ptr != NULL)
     {
-        if(parseJsprFirmwareInfo(response.json, fwInfo))
+        if(response_ptr->code == JSPR_RC_NO_ERROR && strcmp(response_ptr->target, "firmware") == 0)
         {
-            populated = true;
+            if(parseJsprFirmwareInfo(response_ptr->json, fwInfo))
+            {
+                populated = true;
+            }
         }
-    }
-    else
-    {
-        printf("Failed\n");
     }
     return populated;
 }
 
+/**
+ * @brief Retrieve the firmware version string of the modem.
+ *
+ * This function calls `getFirmwareInfo()` to populate the `firmwareInfo` structure,
+ * then formats the version as a string in the form "v<major>.<minor>.<patch>".
+ *
+ * @return char* Pointer to a static buffer containing the firmware version string.
+ *                Returns an empty string if the firmware information could not be retrieved.
+ */
 char * rbGetFirmwareVersion(void)
 {
     if(getFirmwareInfo(&firmwareInfo))
     {
         snprintf(firmwareVersion, FIRMWARE_VERSION_STRING_LEN,"v%u.%u.%u",
-            firmwareInfo.versionInfo.version.major, 
+            firmwareInfo.versionInfo.version.major,
             firmwareInfo.versionInfo.version.minor,
             firmwareInfo.versionInfo.version.patch);
     }
@@ -1015,35 +1696,68 @@ char * rbGetFirmwareVersion(void)
     return firmwareVersion;
 }
 
+// =============================================================================
+// SERVICE CONFIGURATION FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Resynchronize the modem's service configuration.
+ *
+ * This function ensures that the modem's operational state and service configuration
+ * are correctly aligned. The process involves:
+ * 1. Checking the current operational state (ACTIVE/INACTIVE).
+ * 2. If the modem was ACTIVE, temporarily setting it to INACTIVE.
+ * 3. Updating the service configuration using `jsprPutServiceConfig(true)`.
+ * 4. Restoring the operational state to ACTIVE if necessary.
+ *
+ * @return true if the service configuration was successfully resynchronized, false otherwise.
+ */
 bool rbResyncServiceConfig(void)
 {
     bool rVal = false;
     bool isInactive = false;
     bool wasActive = false;
-    jsprResponse_t response;
+    jsprResponse_t* response_ptr;
     jsprOperationalState_t state;
+    uint32_t startTime = millis();
 
     if(jsprGetOperationalState())
     {
-        // Wait for 200 Operational State
-        if (waitForJsprMessage(&response, "operationalState", JSPR_RC_NO_ERROR, 1) == true)
+        while ((millis() - startTime) < 2000)
         {
-            parseJsprGetOperationalState(response.json, &state);
-            if (state.operationalState == INACTIVE)
+            response_ptr = receiveJspr(500);
+            if (response_ptr != NULL)
             {
-                isInactive = true;
-            }
-            else if (state.operationalState == ACTIVE)
-            {
-                wasActive = true;
-                putOperationalState(INACTIVE);
-                // Look for 299 Operational State, this indicates it is actually inactive
-                if (waitForJsprMessage(&response, "operationalState", JSPR_RC_UNSOLICITED_MESSAGE, 1) == true)
+                if (strcmp(response_ptr->target, "operationalState") == 0)
                 {
-                    parseJsprGetOperationalState(response.json, &state);
-                    isInactive = state.operationalState == INACTIVE;
+                    parseJsprGetOperationalState(response_ptr->json, &state);
+                    if (state.operationalState == INACTIVE) isInactive = true;
+                    if (state.operationalState == ACTIVE) wasActive = true;
+                    break;
                 }
             }
+        }
+    }
+
+    if (wasActive == true && isInactive == false)
+    {
+        putOperationalState(INACTIVE);
+        startTime = millis();
+        while ((millis() - startTime) < 2000)
+        {
+             response_ptr = receiveJspr(500);
+             if (response_ptr != NULL)
+             {
+                 if (strcmp(response_ptr->target, "operationalState") == 0)
+                 {
+                     parseJsprGetOperationalState(response_ptr->json, &state);
+                     if (state.operationalState == INACTIVE)
+                     {
+                         isInactive = true;
+                         break;
+                     }
+                 }
+             }
         }
     }
 
@@ -1051,29 +1765,62 @@ bool rbResyncServiceConfig(void)
     {
         if (jsprPutServiceConfig(true) == true)
         {
-            if (waitForJsprMessage(&response, "serviceConfig", JSPR_RC_NO_ERROR, 1) == true)
+            startTime = millis();
+            while ((millis() - startTime) < 2000)
             {
-                if (wasActive != true)
+                response_ptr = receiveJspr(500);
+                if (response_ptr != NULL)
                 {
-                    rVal = true;
-                }
-                else
-                {
-                    putOperationalState(ACTIVE);
-                    // Look for 299 Operational State, this indicates it is actually active again
-                    if (waitForJsprMessage(&response, "operationalState", JSPR_RC_UNSOLICITED_MESSAGE, 1) == true)
+                    if (strcmp(response_ptr->target, "serviceConfig") == 0 && response_ptr->code == JSPR_RC_NO_ERROR)
                     {
-                        parseJsprGetOperationalState(response.json, &state);
-                        rVal = (state.operationalState == ACTIVE);
+                        if (wasActive != true) rVal = true;
+                        break;
                     }
                 }
             }
         }
     }
 
+    if (rVal == false && wasActive == true)
+    {
+        putOperationalState(ACTIVE);
+        startTime = millis();
+        while ((millis() - startTime) < 2000)
+        {
+            response_ptr = receiveJspr(500);
+            if (response_ptr != NULL)
+            {
+                if (strcmp(response_ptr->target, "operationalState") == 0)
+                {
+                    parseJsprGetOperationalState(response_ptr->json, &state);
+                    if (state.operationalState == ACTIVE)
+                    {
+                        rVal = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
     return rVal;
 }
 
+// =============================================================================
+// CRC16 CALCULATION FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Calculate a 16-bit CRC for a given buffer using a precomputed table.
+ *
+ * This function computes the CRC16 of the input buffer using the provided
+ * initial CRC value. The algorithm iterates over each byte of the buffer,
+ * updating the CRC based on the current byte and a lookup table (CRC16Table).
+ *
+ * @param buffer Pointer to the input buffer.
+ * @param bufferLength Length of the input buffer.
+ * @param initialCRC Initial CRC value (usually 0).
+ * @return uint16_t The computed 16-bit CRC value.
+ */
 static uint16_t calculateCrc(const uint8_t * buffer, const size_t bufferLength, const uint16_t initialCRC)
 {
     uint16_t crc = (uint16_t)initialCRC;
@@ -1083,7 +1830,7 @@ static uint16_t calculateCrc(const uint8_t * buffer, const size_t bufferLength, 
     {
         for (size_t i = 0; i < bufferLength; i++)
         {
-            data = ((uint8_t *)buffer)[i];
+            data = buffer[i];
             tableIndex = (((crc >> 8) ^ data) & 0xFF);
             crc = (((crc << 8) ^ CRC16Table[tableIndex]) & 0xFFFF);
         }
@@ -1091,6 +1838,18 @@ static uint16_t calculateCrc(const uint8_t * buffer, const size_t bufferLength, 
     return (crc);
 }
 
+// =============================================================================
+// SERIAL INTERFACE CONTROL FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Deinitialize the serial interface and close the connection.
+ *
+ * Calls the serial deinitialization function from the context. If successful,
+ * marks the serial state as CLOSED.
+ *
+ * @return true if the serial interface was successfully deinitialized, false otherwise.
+ */
 bool rbEnd(void)
 {
     bool deinitialised = false;
@@ -1102,64 +1861,76 @@ bool rbEnd(void)
     return deinitialised;
 }
 
+// =============================================================================
+// PROVISIONING CHECK FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Check if a topic is provisioned (allowed to send messages).
+ * 
+ * This function checks if the given topic is configured in the modem's
+ * message provisioning list. If not, it attempts to retrieve the provisioning
+ * list from the modem and check again.
+ * 
+ * @param topic Topic ID to check.
+ * @return true if the topic is provisioned, false otherwise.
+ */
 static bool checkProvisioning(uint16_t topic)
 {
     bool provisioned = false;
     int count = 0;
 
-    if(topic >= IMT_MIN_TOPIC_ID && topic <= IMT_MAX_TOPIC_ID)
+    if (messageProvisioningInfo.provisioningSet)
     {
-        if (messageProvisioningInfo.provisioningSet)
+        count = messageProvisioningInfo.topicCount;
+        for (int i = 0; i < count; i++)
         {
-            count = messageProvisioningInfo.topicCount;
-            if(count > 0)
+            if(messageProvisioningInfo.provisioning[i].topicId == topic)
             {
-                for (int i = 0; i < count && i < JSPR_MAX_TOPICS; i++)
-                {
-                    if(messageProvisioningInfo.provisioning[i].topicId == topic)
-                    {
-                        provisioned = true;
-                    }
-                }
+                return true;
             }
         }
-        else
+    }
+
+    if (jsprGetMessageProvisioning())
+    {
+        jsprResponse_t* response_ptr;
+        uint32_t startTime = millis();
+
+        while ((millis() - startTime) < 5000)
         {
-            if(jsprGetMessageProvisioning())
+            response_ptr = receiveJspr(500);
+            if (response_ptr != NULL)
             {
-                jsprResponse_t response;
-                receiveJspr(&response, "messageProvisioning");
-                if(JSPR_RC_NO_ERROR == response.code && strcmp(response.target, "messageProvisioning") == 0)
+                if (JSPR_RC_NO_ERROR == response_ptr->code && strcmp(response_ptr->target, "messageProvisioning") == 0)
                 {
                     jsprMessageProvisioning_t messageProvisioning;
-                    if(parseJsprGetMessageProvisioning(response.json, &messageProvisioning))
+                    if (parseJsprGetMessageProvisioning(response_ptr->json, &messageProvisioning))
                     {
-                        if(messageProvisioning.provisioningSet)
-                        {
-                            if(rbCallbacks && rbCallbacks->messageProvisioning)
-                            {
-                                rbCallbacks->messageProvisioning(&messageProvisioning);
-                            }
-                        }
                         messageProvisioningInfo = messageProvisioning;
                         count = messageProvisioning.topicCount;
-                        if(count > 0)
+                        if (count > 0)
                         {
-                            for (int i = 0; i < count && i < JSPR_MAX_TOPICS; i++)
+                            for (int i = 0; i < count; i++)
                             {
-                                if(messageProvisioning.provisioning[i].topicId == topic)
+                                if (messageProvisioning.provisioning[i].topicId == topic)
                                 {
                                     provisioned = true;
                                 }
                             }
                         }
                     }
+                    break;
                 }
             }
         }
     }
     return provisioned;
 }
+
+// =============================================================================
+// KERMIT FIRMWARE UPDATE FUNCTIONS
+// =============================================================================
 
 #if defined(KERMIT)
 #include "kermit_io.h"
@@ -1169,15 +1940,31 @@ struct k_response kermitResponse;
 int kermitStatus = 0;
 unsigned char i_buf[IBUFLEN+8];
 
+/**
+ * @brief Update the modem firmware using the Kermit protocol.
+ *
+ * This function performs a firmware update for the device by:
+ * 1. Checking the file size of the provided firmware file.
+ * 2. Ensuring the modem is in an INACTIVE operational state.
+ * 3. Switching the modem to Kermit boot mode if necessary.
+ * 4. Initializing the Kermit transfer structures and callbacks.
+ * 5. Sending the firmware file using the Kermit protocol and monitoring progress.
+ * 6. Reporting progress via the provided callback function.
+ *
+ * @param firmwareFile Path to the firmware file to be updated.
+ * @param progress Callback function to report update progress.
+ * @param context Context pointer to pass to the progress callback.
+ * @return true if the firmware update was successfully completed, false otherwise.
+ */
 bool rbUpdateFirmware (const char * firmwareFile, updateProgressCallback progress, void * context)
 {
     const char * firmwareFileList[2] = {firmwareFile, NULL};
-    unsigned char *inputBufferPtr = (unsigned char *)0; // E-Kermit doesn't like NULL
+    unsigned char *inputBufferPtr = (unsigned char *)0;
     short receiveSlot = 0;
     int kermitRxLength = 0;
     void * contextPtr = context;
 
-    jsprResponse_t response;
+    jsprResponse_t* response_ptr;
     jsprOperationalState_t state;
     jsprFirmwareInfo_t firmware;
     jsprBootInfo_t bootInfo;
@@ -1193,23 +1980,22 @@ bool rbUpdateFirmware (const char * firmwareFile, updateProgressCallback progres
     const long filesize = kermit_io_filesize(firmwareFile);
     if (filesize <= 0)
     {
-        // invalid firmware file
         return firmwareUpdated;
     }
 
-    if(jsprGetOperationalState())
+    if (jsprGetOperationalState())
     {
-        // Wait for 200 Operational State
-        if (waitForJsprMessage(&response, "operationalState", JSPR_RC_NO_ERROR, 1) == true)
+        response_ptr = receiveJspr(1000);
+        if(response_ptr != NULL && response_ptr->code == JSPR_RC_NO_ERROR)
         {
-            parseJsprGetOperationalState(response.json, &state);
+            parseJsprGetOperationalState(response_ptr->json, &state);
             if (state.operationalState != INACTIVE)
             {
                 putOperationalState(INACTIVE);
-                // Look for 299 Operational State, this indicates it is actually inactive
-                if (waitForJsprMessage(&response, "operationalState", JSPR_RC_UNSOLICITED_MESSAGE, 1) == true)
+                response_ptr = receiveJspr(1000);
+                if (response_ptr != NULL && response_ptr->code == JSPR_RC_UNSOLICITED_MESSAGE)
                 {
-                    parseJsprGetOperationalState(response.json, &state);
+                    parseJsprGetOperationalState(response_ptr->json, &state);
                     isInactive = state.operationalState == INACTIVE;
                 }
             }
@@ -1225,12 +2011,10 @@ bool rbUpdateFirmware (const char * firmwareFile, updateProgressCallback progres
     {
         if (jsprPutFirmware(JSPR_BOOT_SOURCE_PRIMARY))
         {
-            if(receiveJspr(&response, "firmware"))
+            response_ptr = receiveJspr(2000);
+            if(response_ptr != NULL && response_ptr->code == JSPR_RC_NO_ERROR)
             {
-                if(JSPR_RC_NO_ERROR == response.code)
-                {
-                    isInKermitMode = parseJsprFirmwareInfo(response.json, &firmware);
-                }
+                isInKermitMode = parseJsprFirmwareInfo(response_ptr->json, &firmware);
             }
         }
     }
@@ -1238,26 +2022,21 @@ bool rbUpdateFirmware (const char * firmwareFile, updateProgressCallback progres
     if (isInKermitMode == true)
     {;
         kermit_io_init_string();
-
         delay(1000);
-
-        kermitData.xfermode = 0;                                         /* Automatic Mode  */
-        kermitData.remote = 0;                                           /* Local */
-        kermitData.binary = 1;                                           /* Binary */
-        kermitData.parity = PAR_NONE;                                    /* No parity */
-        kermitData.bct = 1;                                              /* Use Block check type 3 */
-        kermitData.ikeep = OFF;                                          /* Don't keep files but pointless i this implementation */
-        kermitData.filelist = (unsigned char **)&firmwareFileList;       /* List of files to send (if any) */
-        kermitData.cancel = 0;                                           /* Not canceled yet */
-
-        /*  Fill in the i/o pointers  */
-        kermitData.zinbuf = i_buf;                                       /* File input buffer */
-        kermitData.zinlen = IBUFLEN;                                     /* File input buffer length */
-        kermitData.zincnt = 0;                                           /* File input buffer position */
-        kermitData.obuf = (unsigned char *)0;                            /* File output buffer */
-        kermitData.obuflen = 0;                                          /* File output buffer length */
-        kermitData.obufpos = 0;                                          /* File output buffer position */
-
+        kermitData.xfermode = 0;
+        kermitData.remote = 0;
+        kermitData.binary = 1;
+        kermitData.parity = PAR_NONE;
+        kermitData.bct = 1;
+        kermitData.ikeep = OFF;
+        kermitData.filelist = (unsigned char **)&firmwareFileList;
+        kermitData.cancel = 0;
+        kermitData.zinbuf = i_buf;
+        kermitData.zinlen = IBUFLEN;
+        kermitData.zincnt = 0;
+        kermitData.obuf = (unsigned char *)0;
+        kermitData.obuflen = 0;
+        kermitData.obufpos = 0;
         kermitData.rxd    = kermit_io_readpkt;
         kermitData.txd    = kermit_io_tx_data;
         kermitData.ixd    = kermit_io_inchk;
@@ -1267,18 +2046,17 @@ bool rbUpdateFirmware (const char * firmwareFile, updateProgressCallback progres
         kermitData.writef = 0;
         kermitData.closef = kermit_io_closefile;
         kermitData.dbf    = 0;
-
         kermitStatus = kermit(K_INIT, &kermitData, 0, 0, 0, &kermitResponse);
         if (kermitStatus == SUCCESS)
         {
-            kermitResponse.filesize = filesize; // Need a file size for a progress callback
+            kermitResponse.filesize = filesize;
 
             kermitStatus = kermit(K_SEND, &kermitData, 0, 0, 0, &kermitResponse);
             if (kermitStatus == SUCCESS)
             {
                 while (kermitStatus != X_RC_DONE)
                 {
-                    inputBufferPtr = (unsigned char *)0; // E-Kermit doesn't like NULL;
+                    inputBufferPtr = (unsigned char *)0;
                     receiveSlot = -1;
                     kermitRxLength = 0;
 
@@ -1307,7 +2085,6 @@ bool rbUpdateFirmware (const char * firmwareFile, updateProgressCallback progres
                             kermitDone = true;
                         break;
                         case X_RC_ERROR:
-                            // printf("Kermit K_RUN error\n");
                         break;
                     }
                 }
@@ -1317,13 +2094,8 @@ bool rbUpdateFirmware (const char * firmwareFile, updateProgressCallback progres
 
     if (kermitDone == true)
     {
-        // Since board revision 2 (note that board revision 1 was never publicly available)
-        // When kermit is done, the 9704 modem will reboot, as a result the USB
-        // serial driver will disabled then re-enable, so we will need to re-enable
-        // the library for the new usb port, it might be different.
         firmwareUpdated = true;
     }
-
     return firmwareUpdated;
 }
 #endif

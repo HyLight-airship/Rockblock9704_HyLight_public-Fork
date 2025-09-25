@@ -3,15 +3,6 @@
 
 #if defined(USE_STM32_HAL) && defined(RB_GPIO)
 
-// This default GPIO table corresponds to the definitions in gpio.h.
-// It now uses the corrected, standard macro names.
-const rbGpioTable_t gpioTable =
-{
-    { POWER_EN_GPIO_Port,    POWER_EN_Pin    },
-    { IRIDIUM_EN_GPIO_Port,  IRIDIUM_EN_Pin  },
-    { IRIDIUM_BTD_GPIO_Port, IRIDIUM_BTD_Pin }
-};
-
 /**
  * @brief Drives a GPIO pin high (3.3V).
  * @param port The GPIO port (e.g., GPIOB).

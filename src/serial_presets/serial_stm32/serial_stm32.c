@@ -2,68 +2,76 @@
 #include "serial_stm32.h"
 #include <string.h>
 
-#if defined(USE_STM32_HAL)
+#if defined(USE_STM32_HAL) || 1
 
-// --- DMA and Buffer Configuration ---
-#define DMA_RX_BUFFER_SIZE      64      // Small buffer for DMA hardware to write into.
-#define APP_RX_BUFFER_SIZE      512     // Larger circular buffer for the application to read from.
+// --- Ring buffer Variables ---
+#define RX_BUFFER_SIZE      512
 
-static uint8_t dma_rx_buffer[DMA_RX_BUFFER_SIZE];
-static uint8_t app_rx_buffer[APP_RX_BUFFER_SIZE];
+typedef struct
+{
+    uint8_t buffer[RX_BUFFER_SIZE];
+    volatile uint16_t head;
+    volatile uint16_t tail;
+} RingBuffer;
 
-static volatile uint16_t app_rx_head = 0;
-static volatile uint16_t app_rx_tail = 0;
-static size_t old_dma_pos = 0;
 
-// --- STM32 HAL Specific Variables ---
-static UART_HandleTypeDef *uart_handle = NULL;
+static RingBuffer rx_ringbuffer = { {0}, 0, 0 };
+
+static uint8_t rx_byte;
+
+// --- Rockblock serial variables ---
 extern serialContext context;
 extern enum serialState serialState;
 
-// --- Forward Declarations ---
+// --- STM32 HAL Specific Variables ---
+static UART_HandleTypeDef *uart_handle = NULL;
+
+// --- Prototypes ---
 static bool openPortStm32(void);
 static bool closePortStm32(void);
 static int readStm32(char *bytes, const uint16_t length);
 static int writeStm32(const char *data, const uint16_t length);
 static int peekStm32(void);
 
-/**
- * @brief  UART DMA Receive Event Callback.
- * @note   This function is called by the HAL when the DMA buffer is half full,
- * completely full, or when an idle line is detected.
- * @param  huart: UART handle
- * @param  Size: Number of data bytes received since the last event.
- */
-void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
+void ringbuffer_put(RingBuffer *rb, uint8_t data)
 {
-    if (huart == uart_handle)
+    uint16_t next = (rb->head + 1) % RX_BUFFER_SIZE;
+    if (next != rb->tail) {   // buffer not full
+        rb->buffer[rb->head] = data;
+        rb->head = next;
+    }
+    else
     {
-        size_t new_dma_pos = DMA_RX_BUFFER_SIZE - __HAL_DMA_GET_COUNTER(huart->hdmarx);
+    	printf("ERROR!!! Ring buffer overflow\r\n");
+    }
+}
 
-        // If the DMA counter has wrapped around
-        if (new_dma_pos < old_dma_pos)
-        {
-            // Process the first part (from old_pos to the end of the buffer)
-            for (size_t i = old_dma_pos; i < DMA_RX_BUFFER_SIZE; i++)
-            {
-                app_rx_buffer[app_rx_head] = dma_rx_buffer[i];
-                app_rx_head = (app_rx_head + 1) % APP_RX_BUFFER_SIZE;
-            }
-        }
+int ringbuffer_get(RingBuffer *rb, uint8_t *data)
+{
+    if (rb->head == rb->tail)
+    {
+    	return 0;  // empty
+    }
 
-        // Process the new data (from old_pos to new_pos)
-        for (size_t i = old_dma_pos; i < new_dma_pos; i++)
-        {
-            app_rx_buffer[app_rx_head] = dma_rx_buffer[i];
-            app_rx_head = (app_rx_head + 1) % APP_RX_BUFFER_SIZE;
-        }
+    *data = rb->buffer[rb->tail];
+    rb->tail = (rb->tail + 1) % RX_BUFFER_SIZE;
+    return 1;
+}
 
-        old_dma_pos = new_dma_pos;
-        // If the DMA is at the end of the buffer, reset its position
-        if (old_dma_pos == DMA_RX_BUFFER_SIZE)
-        {
-            old_dma_pos = 0;
-        }
+void ringbuffer_clear(RingBuffer *rb)
+{
+    rb->head = 0;
+    rb->tail = 0;
+    memset(rb->buffer, 0, RX_BUFFER_SIZE);
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == uart_handle->Instance)
+    {
+    	ringbuffer_put(&rx_ringbuffer, rx_byte);
+        // Re-enable interrupt to receive next byte
+        HAL_UART_Receive_IT(huart, &rx_byte, 1);
     }
 }
 
@@ -76,7 +84,7 @@ bool setContextStm32(UART_HandleTypeDef *huart)
     }
     uart_handle = huart;
 
-    strncpy(context.serialPort, "STM32_UART_DMA", SERIAL_PORT_LENGTH);
+    strncpy(context.serialPort, "STM32_UART1", SERIAL_PORT_LENGTH);
     context.serialBaud = huart->Init.BaudRate;
     context.serialInit = openPortStm32;
     context.serialDeInit = closePortStm32;
@@ -101,12 +109,10 @@ static bool openPortStm32(void)
         // ***** END OF ADDED CODE *****
 
         // Reset buffer state
-        app_rx_head = 0;
-        app_rx_tail = 0;
-        old_dma_pos = 0;
+        ringbuffer_clear(&rx_ringbuffer);
 
-        // Start DMA reception with Idle Line detection
-        if (HAL_UARTEx_ReceiveToIdle_DMA(uart_handle, dma_rx_buffer, DMA_RX_BUFFER_SIZE) == HAL_OK)
+        // Reception
+        if (HAL_UART_Receive_IT(uart_handle, &rx_byte, 1) == HAL_OK)
         {
             serialState = OPEN;
             return true;
@@ -119,7 +125,7 @@ static bool closePortStm32(void)
 {
     if (uart_handle != NULL && serialState != CLOSED)
     {
-        HAL_UART_DMAStop(uart_handle);
+        HAL_UART_Abort(uart_handle);
         serialState = CLOSED;
         return true;
     }
@@ -130,7 +136,7 @@ static int writeStm32(const char *data, const uint16_t length)
 {
     if (serialState == OPEN)
     {
-        // Use a long timeout as the modem can sometimes take a moment
+    	// Transmission will be done with timeout instead of interrupt to ensure correct transmission before trying to read
         if (HAL_UART_Transmit(uart_handle, (uint8_t*)data, length, 500) == HAL_OK)
         {
             return length;
@@ -147,10 +153,17 @@ static int readStm32(char *bytes, const uint16_t length)
     }
 
     uint16_t bytes_read = 0;
-    while (bytes_read < length && app_rx_tail != app_rx_head)
+    while (bytes_read < length)
     {
-        bytes[bytes_read++] = app_rx_buffer[app_rx_tail];
-        app_rx_tail = (app_rx_tail + 1) % APP_RX_BUFFER_SIZE;
+    	uint8_t byte;
+    	if (ringbuffer_get(&rx_ringbuffer, &byte))
+    	{
+    		bytes[bytes_read++] = byte;
+    	}
+    	else
+    	{
+    		break;
+    	}
     }
     return bytes_read;
 }
@@ -162,14 +175,7 @@ static int peekStm32(void)
         return -1;
     }
 
-    if (app_rx_head >= app_rx_tail)
-    {
-        return app_rx_head - app_rx_tail;
-    }
-    else
-    {
-        return APP_RX_BUFFER_SIZE - (app_rx_tail - app_rx_head);
-    }
+    return (rx_ringbuffer.head - rx_ringbuffer.tail + RX_BUFFER_SIZE) % RX_BUFFER_SIZE;
 }
 
 #endif // defined(USE_STM32_HAL)

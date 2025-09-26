@@ -20,7 +20,7 @@ extern "C" {
 
     unsigned long millis(void);
     void delay(uint32_t ms);
-#elif defined(__linux__) || defined(__APPLE__)
+#elif defined(__linux__) || defined(__APPLE__) || defined(USE_STM32_HAL)
     #include <stdint.h>
 
     unsigned long millis(void);

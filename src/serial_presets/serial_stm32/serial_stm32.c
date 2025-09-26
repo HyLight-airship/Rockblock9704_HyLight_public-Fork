@@ -2,7 +2,7 @@
 #include "serial_stm32.h"
 #include <string.h>
 
-#if defined(USE_STM32_HAL) || 1
+#if defined(USE_STM32_HAL)
 
 // --- Ring buffer Variables ---
 #define RX_BUFFER_SIZE      512
